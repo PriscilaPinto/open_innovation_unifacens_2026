@@ -1,31 +1,42 @@
-name: SCA Scan
+name: DevSecOps Pipeline
 
 on:
+  schedule:
+    - cron: '0 0 * * 0'
+
   workflow_dispatch:
 
 jobs:
-  dependency-check:
-
+  security-scan:
     runs-on: ubuntu-latest
 
-    env:
-      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
-
     steps:
-
-      - name: Checkout
+      - name: Checkout do repositório
         uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - name: Instalar PHP
+        uses: shivammathur/setup-php@v2
         with:
-          distribution: temurin
-          java-version: 17
+          php-version: '8.1'
 
-      - name: Run Dependency Check
+      - name: Instalar dependências
+        run: composer install
+
+      - name: Instalar Trivy
         run: |
-          ./dependency-check/bin/dependency-check.sh \
-          --scan . \
-          --format JSON \
-          --out reports \
-          --nvdApiKey $NVD_API_KEY
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy -y
+
+      - name: Executar scan
+        run: |
+          trivy fs . --format json -o reports/report.json
+
+      - name: Upload do relatório
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: reports/report.json
