@@ -6,64 +6,64 @@ on:
       - main
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
-  security-scan:
+  scan:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout do repositório
+      # 1. Checkout do código
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Configurar PHP
+      # 2. Setup PHP
+      - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.1'
+          php-version: 8.1
 
-      - name: Instalar dependências PHP
-        run: composer install
+      # 3. Instala dependências PHP
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
 
-      - name: Criar pasta de relatórios
+      # 4. Criar pasta de reports
+      - name: Prepare reports folder
         run: mkdir -p reports
 
-      - name: Instalar Trivy
+      # 5. Instalar Trivy
+      - name: Install Trivy
         run: |
           sudo apt-get update
           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
           sudo apt-get update
           sudo apt-get install -y trivy
 
-      - name: Executar scan de vulnerabilidades
-        run: |
-          trivy fs . \
-            --format json \
-            --output reports/report.json
+      # 6. Rodar scan e gerar relatório
+      - name: Run Trivy scan
+        run: trivy fs . -f json -o reports/report.json
 
-      - name: Mostrar resumo do relatório
-        run: |
-          echo "Relatórios gerados:"
-          ls -lah reports/
-
-      - name: Upload do relatório como artifact
+      # 7. Upload do artifact (backup)
+      - name: Upload report artifact
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report-json
           path: reports/report.json
 
-      - name: Commit automático do relatório
+      # 8. Commit do relatório no repo (CORRIGIDO)
+      - name: Commit security report
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
           git add reports/report.json
 
-          git diff --cached --quiet || git commit -m "Atualiza relatório Trivy"
+          # evita erro se não houver mudanças
+          git commit -m "Atualiza relatório Trivy" || echo "Sem mudanças para commit"
 
-          git push
+          # sincroniza com remoto antes do push (CORREÇÃO DO SEU ERRO)
+          git pull --rebase origin main
+
+          git push origin main
