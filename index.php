@@ -6,6 +6,12 @@ use GuzzleHttp\Client;
 
 $client = new Client();
 
-$response = $client->request('GET', 'https://api.github.com');
+try {
+    $response = $client->request('GET', 'https://api.github.com');
 
-echo "Status: " . $response->getStatusCode();
+    echo "Status da API: " . $response->getStatusCode();
+
+} catch (Exception $e) {
+
+    echo "Erro: " . $e->getMessage();
+}
