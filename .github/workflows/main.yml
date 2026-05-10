@@ -1,0 +1,31 @@
+name: SCA Scan
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dependency-check:
+
+    runs-on: ubuntu-latest
+
+    env:
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Run Dependency Check
+        run: |
+          ./dependency-check/bin/dependency-check.sh \
+          --scan . \
+          --format JSON \
+          --out reports \
+          --nvdApiKey $NVD_API_KEY
