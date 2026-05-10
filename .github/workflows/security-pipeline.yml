@@ -1,42 +1,52 @@
-name: DevSecOps Pipeline
+name: security-scan
 
 on:
-  schedule:
-    - cron: '0 0 * * 0'
-
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
 
 jobs:
   security-scan:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout do repositório
+      - name: Checkout do código
         uses: actions/checkout@v4
 
-      - name: Instalar PHP
+      - name: Configurar PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.1'
+          tools: composer
 
       - name: Instalar dependências
         run: composer install
 
+      - name: Criar pasta de relatórios
+        run: mkdir -p reports
+
       - name: Instalar Trivy
         run: |
           sudo apt-get update
-          sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          
           sudo apt-get update
-          sudo apt-get install trivy -y
+          sudo apt-get install -y trivy
 
-      - name: Executar scan
+      - name: Executar scan do Trivy
         run: |
-          trivy fs . --format json -o reports/report.json
+          trivy fs . \
+          --scanners vuln,secret \
+          --format json \
+          -o reports/report.json
 
-      - name: Upload do relatório
+      - name: Upload relatório JSON
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-report
+          name: trivy-report-json
           path: reports/report.json
