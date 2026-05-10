@@ -6,21 +6,23 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   security-scan:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout do código
+      - name: Checkout do repositório
         uses: actions/checkout@v4
 
       - name: Configurar PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.1'
-          tools: composer
 
-      - name: Instalar dependências
+      - name: Instalar dependências PHP
         run: composer install
 
       - name: Criar pasta de relatórios
@@ -30,23 +32,38 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          
+
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          
+
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          
+
           sudo apt-get update
           sudo apt-get install -y trivy
 
-      - name: Executar scan do Trivy
+      - name: Executar scan de vulnerabilidades
         run: |
           trivy fs . \
-          --scanners vuln,secret \
-          --format json \
-          -o reports/report.json
+            --format json \
+            --output reports/report.json
 
-      - name: Upload relatório JSON
+      - name: Mostrar resumo do relatório
+        run: |
+          echo "Relatórios gerados:"
+          ls -lah reports/
+
+      - name: Upload do relatório como artifact
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report-json
           path: reports/report.json
+
+      - name: Commit automático do relatório
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          git add reports/report.json
+
+          git diff --cached --quiet || git commit -m "Atualiza relatório Trivy"
+
+          git push
