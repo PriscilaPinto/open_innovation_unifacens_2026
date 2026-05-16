@@ -44,12 +44,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
           | sudo tee /etc/apt/sources.list.d/trivy.list
-
           sudo apt-get update
           sudo apt-get install -y trivy
 
@@ -67,16 +64,18 @@ jobs:
           name: trivy-report-json
           path: reports/report.json
 
-      # 8. Commitar relatório automaticamente na develop
+      # 8. Commitar relatório automaticamente na develop (sem rebase)
       - name: Commit and push report
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
           git add reports/report.json
-
           git commit -m "Atualiza relatório Trivy" || echo "Sem alterações"
 
-          git pull --rebase origin develop
+          # push direto sem rebase (evita conflitos)
+          git push origin develop
 
-          git push origin HEAD:develop
+
+
+          
