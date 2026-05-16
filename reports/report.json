@@ -3,15 +3,15 @@
   "Trivy": {
     "Version": "0.70.0"
   },
-  "ReportID": "019e3338-ce78-7a79-ab9a-fc4951f0d372",
-  "CreatedAt": "2026-05-16T23:57:01.432687331Z",
-  "ArtifactID": "sha256:b74c7908004e655429b78b1a5c80dcdc2015f8ab1297acaff54ed8bd374fc90e",
+  "ReportID": "019e3339-f1f9-7cf4-b92e-5c95e736eaad",
+  "CreatedAt": "2026-05-16T23:58:16.057850029Z",
+  "ArtifactID": "sha256:76019aee8dbef01cf70b6417e47323a623d6a3ff3210f41dace10aae72191c3a",
   "ArtifactName": ".",
   "ArtifactType": "repository",
   "Metadata": {
     "RepoURL": "https://github.com/PriscilaPinto/open_innovation_virtual",
     "Branch": "develop",
-    "Commit": "d714a46e99089cd57d6f0beb4b57bd8cd2b5c47d",
+    "Commit": "8b6f491dad72821f9b1b8c94a0238e24f1ea60b2",
     "CommitMsg": "Atualiza relatório Trivy",
     "Author": "github-actions \u003cgithub-actions@github.com\u003e",
     "Committer": "github-actions \u003cgithub-actions@github.com\u003e"
@@ -198,7 +198,7 @@
             "Name": "PHP Security Advisories Database",
             "URL": "https://github.com/FriendsOfPHP/security-advisories"
           },
-          "Fingerprint": "sha256:ea8f1b62cfcc550db83e8cbac40b7902bf59e98cbe7e592e10d480eb75b1cef7",
+          "Fingerprint": "sha256:5ada5c87e8489fde4be394bb38b2b7befbacab43f5da8a108167be3daf2e532c",
           "Title": "Guzzle is a PHP HTTP client. Guzzle prior to versions 6.5.6 and 7.4.3  ...",
           "Description": "Guzzle is a PHP HTTP client. Guzzle prior to versions 6.5.6 and 7.4.3 contains a vulnerability with the cookie middleware. The vulnerability is that it is not checked if the cookie domain equals the domain of the server which sets the cookie via the Set-Cookie header, allowing a malicious server to set cookies for unrelated domains. The cookie middleware is disabled by default, so most library consumers will not be affected by this issue. Only those who manually add the cookie middleware to the handler stack or construct the client with ['cookies' =\u003e true] are affected. Moreover, those who do not use the same Guzzle client to call multiple domains and have disabled redirect forwarding are not affected by this vulnerability. Guzzle versions 6.5.6 and 7.4.3 contain a patch for this issue. As a workaround, turn off the cookie middleware.",
           "Severity": "HIGH",
@@ -258,7 +258,7 @@
             "Name": "PHP Security Advisories Database",
             "URL": "https://github.com/FriendsOfPHP/security-advisories"
           },
-          "Fingerprint": "sha256:6a1813a10744008e66e2a52ce35307fe3ebcc90e7fac0d0e5b39e440ecadc7cb",
+          "Fingerprint": "sha256:18077a9d76d437503c50234fd2118a798a9b20c1f67179f545c1aed811f2817e",
           "Title": "Guzzle is an open source PHP HTTP client. In affected versions the `Co ...",
           "Description": "Guzzle is an open source PHP HTTP client. In affected versions the `Cookie` headers on requests are sensitive information. On making a request using the `https` scheme to a server which responds with a redirect to a URI with the `http` scheme, or on making a request to a server which responds with a redirect to a a URI to a different host, we should not forward the `Cookie` header on. Prior to this fix, only cookies that were managed by our cookie middleware would be safely removed, and any `Cookie` header manually added to the initial request would not be stripped. We now always strip it, and allow the cookie middleware to re-add any cookies that it deems should be there. Affected Guzzle 7 users should upgrade to Guzzle 7.4.4 as soon as possible. Affected users using any earlier series of Guzzle should upgrade to Guzzle 6.5.7 or 7.4.4. Users unable to upgrade may consider an alternative approach to use your own redirect middleware, rather than ours. If you do not require or expect redirects to be followed, one should simply disable redirects all together.",
           "Severity": "HIGH",
@@ -318,7 +318,7 @@
             "Name": "PHP Security Advisories Database",
             "URL": "https://github.com/FriendsOfPHP/security-advisories"
           },
-          "Fingerprint": "sha256:dbce1af9b4d454944a73ce630784e3a174bc0fc89a97a98506c1aebbb5403841",
+          "Fingerprint": "sha256:9becc63dedb69b6925e07f54e189433ecab3d61264b14be0f313f942fd353e78",
           "Title": "Guzzle is an open source PHP HTTP client. In affected versions `Author ...",
           "Description": "Guzzle is an open source PHP HTTP client. In affected versions `Authorization` headers on requests are sensitive information. On making a request using the `https` scheme to a server which responds with a redirect to a URI with the `http` scheme, we should not forward the `Authorization` header on. This is much the same as to how we don't forward on the header if the host changes. Prior to this fix, `https` to `http` downgrades did not result in the `Authorization` header being removed, only changes to the host. Affected Guzzle 7 users should upgrade to Guzzle 7.4.4 as soon as possible. Affected users using any earlier series of Guzzle should upgrade to Guzzle 6.5.7 or 7.4.4. Users unable to upgrade may consider an alternative approach which would be to use their own redirect middleware. Alternately users may simply disable redirects all together if redirects are not expected or required.",
           "Severity": "HIGH",
@@ -378,7 +378,7 @@
             "Name": "PHP Security Advisories Database",
             "URL": "https://github.com/FriendsOfPHP/security-advisories"
           },
-          "Fingerprint": "sha256:cb7a7faa3cb62183b928968159b84405e8f844b469265fc0feaceabd64be387c",
+          "Fingerprint": "sha256:acd82c169108d528ead1ae90793c51c4d357dca19e6d580ff1c8283cdde0c23a",
           "Title": "Guzzle, an extensible PHP HTTP client. `Authorization` headers on requ ...",
           "Description": "Guzzle, an extensible PHP HTTP client. `Authorization` headers on requests are sensitive information. In affected versions when using our Curl handler, it is possible to use the `CURLOPT_HTTPAUTH` option to specify an `Authorization` header. On making a request which responds with a redirect to a URI with a different origin (change in host, scheme or port), if we choose to follow it, we should remove the `CURLOPT_HTTPAUTH` option before continuing, stopping curl from appending the `Authorization` header to the new request. Affected Guzzle 7 users should upgrade to Guzzle 7.4.5 as soon as possible. Affected users using any earlier series of Guzzle should upgrade to Guzzle 6.5.8 or 7.4.5. Note that a partial fix was implemented in Guzzle 7.4.2, where a change in host would trigger removal of the curl-added Authorization header, however this earlier fix did not cover change in scheme or change in port. If you do not require or expect redirects to be followed, one should simply disable redirects all together. Alternatively, one can specify to use the Guzzle steam handler backend, rather than curl.",
           "Severity": "HIGH",
@@ -434,7 +434,7 @@
             "Name": "PHP Security Advisories Database",
             "URL": "https://github.com/FriendsOfPHP/security-advisories"
           },
-          "Fingerprint": "sha256:4e7083c4fbd07f2e800322cb949eae816fb43a71416f3c26a1bf7b44b109817a",
+          "Fingerprint": "sha256:cd9ca904460e2742af3c8ec8d7c186c8b3dbc0e39db840205eda79bfa8ece958",
           "Title": "Guzzle, an extensible PHP HTTP client. `Authorization` and `Cookie` he ...",
           "Description": "Guzzle, an extensible PHP HTTP client. `Authorization` and `Cookie` headers on requests are sensitive information. In affected versions on making a request which responds with a redirect to a URI with a different port, if we choose to follow it, we should remove the `Authorization` and `Cookie` headers from the request, before containing. Previously, we would only consider a change in host or scheme. Affected Guzzle 7 users should upgrade to Guzzle 7.4.5 as soon as possible. Affected users using any earlier series of Guzzle should upgrade to Guzzle 6.5.8 or 7.4.5. Note that a partial fix was implemented in Guzzle 7.4.2, where a change in host would trigger removal of the curl-added Authorization header, however this earlier fix did not cover change in scheme or change in port. An alternative approach would be to use your own redirect middleware, rather than ours, if you are unable to upgrade. If you do not require or expect redirects to be followed, one should simply disable redirects all together.",
           "Severity": "HIGH",
