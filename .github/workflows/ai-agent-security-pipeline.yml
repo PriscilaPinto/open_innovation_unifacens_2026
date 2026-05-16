@@ -101,7 +101,7 @@ jobs:
       # Executa o seu framework.py modificado (ele gera o index_remediated.php)
       - name: Run AI Remediation Framework
         env:
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }} # Puxa o token secreto configurado no GitHub
+          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }} # Puxa o seu segredo mapeado como GEMINI_API_KEY
         run: python framework.py
 
       # Sobe o arquivo corrigido pela IA como artefato para o próximo Job testar
