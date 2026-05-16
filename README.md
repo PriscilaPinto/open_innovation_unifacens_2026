@@ -143,6 +143,7 @@ Exemplos identificados:
 - [x] Pipeline DevSecOps
 - [x] Trivy SCA
 - [x] Relatórios automatizados
+- [x] Execução diária via cron
 - [ ] Agente IA
 - [ ] Remediação automática
 - [ ] Virtual patching
