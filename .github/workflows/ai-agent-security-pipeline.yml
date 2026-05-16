@@ -132,13 +132,14 @@ jobs:
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
 
-      # PASSO NOVO: Substitui o index.php vulnerável pelo index_remediated.php que a IA corrigiu e testou
-      - name: Apply AI Patch to index.php
+      # PASSO AJUSTADO: Aplica o patch substituto e limpa a pasta oculta de cache gerada pelo Trivy
+      - name: Apply AI Patch and Clean Cache
         run: |
           cp index_remediated.php index.php
           rm index_remediated.php
+          rm -rf .cache/
 
-      # PASSO NOVO: Cria a branch isolada e abre o PR automaticamente direcionado para a 'homolog'
+      # PASSO DE CRIAÇÃO DO PR: Executa livre de arquivos pesados
       - name: 🚀 Create Pull Request to Homolog
         uses: peter-evans/create-pull-request@v6
         with:
