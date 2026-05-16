@@ -47,6 +47,7 @@ Pull Request / Security Ticket
 - Trivy
 - GitHub Actions
 - Ubuntu 22.04
+- git version 2.54.0.windows.1
 
 ---
 
