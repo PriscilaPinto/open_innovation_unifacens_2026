@@ -43,7 +43,7 @@ Pull Request / Security Ticket
 
 - PHP 8.1
 - Composer
-- Python
+- Python 3.14.5
 - Trivy
 - GitHub Actions
 - Ubuntu 22.04
