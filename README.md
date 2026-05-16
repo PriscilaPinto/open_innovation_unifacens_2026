@@ -43,11 +43,15 @@ Pull Request / Security Ticket
 
 - PHP 8.1
 - Composer
-- Python
+- Python 3.14.5
 - Trivy
 - GitHub Actions
 - Ubuntu 22.04
 - git version 2.54.0.windows.1
+- langchain-core: 1.4.0
+- langchain-google-genai: 4.2.2
+- google-genai: 1.75.0 
+- requests: 2.34.2
 
 ---
 
@@ -143,6 +147,7 @@ Exemplos identificados:
 - [x] Pipeline DevSecOps
 - [x] Trivy SCA
 - [x] Relatórios automatizados
+- [x] Execução diária via cron
 - [ ] Agente IA
 - [ ] Remediação automática
 - [ ] Virtual patching
