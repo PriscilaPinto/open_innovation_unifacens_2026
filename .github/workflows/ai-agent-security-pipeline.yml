@@ -1,0 +1,154 @@
+name: DevSecOps Automated Remediation Pipeline
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  # ==========================================
+  # JOB 1: SCAN DE VULNERABILIDADES (SEU ANTIGO)
+  # ==========================================
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: develop
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.1
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Prepare reports folder
+        run: mkdir -p reports
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+          | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Run Trivy scan
+        run: |
+          trivy fs . \
+            --format json \
+            --output reports/report.json
+
+      # Upload do relatório para o Job da IA consumir
+      - name: Upload Trivy Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-json
+          path: reports/report.json
+
+      - name: Commit and push report
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add reports/report.json
+          git commit -m "chore: atualiza relatorio Trivy [skip ci]" || echo "Sem alterações"
+          git push origin develop
+
+  # ==========================================
+  # JOB 2: AGENTE DE IA (GERAÇÃO DO PATCH)
+  # ==========================================
+  ai-remediation:
+    name: 🤖 Executar Agente de IA (Remediação)
+    needs: security-scan # Só roda se o scan terminar
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      # Baixa o report json gerado no Job 1
+      - name: Download Trivy Report
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-report-json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      # Instala as dependências do LangChain e Gemini na nuvem
+      - name: Install Python Dependencies
+        run: |
+          pip install langchain-core langchain-google-genai
+
+      # Executa o seu framework.py modificado (ele gera o index_remediated.php)
+      - name: Run AI Remediation Framework
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }} # Puxa o token secreto configurado no GitHub
+        run: python framework.py
+
+      # Sobe o arquivo corrigido pela IA como artefato para o próximo Job testar
+      - name: Upload Remediated File Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remediated-php-file
+          path: index_remediated.php
+
+  # ==========================================
+  # JOB 3: VALIDAÇÃO DINÂMICA & RE-SCAN (NOVO!)
+  # ==========================================
+  security-validation:
+    name: 🧪 Validação e Re-scan de Segurança
+    needs: ai-remediation # Só roda se a IA gerou o patch com sucesso
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      # Baixa o arquivo corrigido pela IA lá do Job 2
+      - name: Download Remediated File
+        uses: actions/download-artifact@v4
+        with:
+          name: remediated-php-file
+
+      # Configura o ambiente PHP na nuvem para fazermos o teste de caixa-branca
+      - name: Setup PHP Environment for Sandbox
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3' # Testa em uma versão mais recente para garantir compatibilidade
+
+      # Executa o PHP Lint na nuvem (validação estática)
+      - name: ⚙️ Teste de Sintaxe (PHP Lint)
+        run: php -l index_remediated.php
+
+      # Instala o Trivy de forma limpa via Action oficial da Aqua Security para o re-scan
+      - name: 🔍 Re-scan de Segurança no Código da IA
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'index_remediated.php' # Aponta exclusivamente para o patch gerado
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1' # CRUCIAL: Quebra a pipeline se a IA falhou em mitigar os CVEs!
+
+      - name: 🎉 Sucesso Total
+        run: echo "O patch gerado pela IA passou em todos os testes de segurança e integridade!"
