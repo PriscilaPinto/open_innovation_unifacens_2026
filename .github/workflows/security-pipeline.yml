@@ -3,10 +3,12 @@ name: security-scan
 on:
   push:
     branches:
-      - main
+      - develop
+
   pull_request:
 
-# 🔐 ESSENCIAL: permite o GitHub Actions escrever no repositório
+  workflow_dispatch:
+
 permissions:
   contents: write
 
@@ -15,12 +17,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout do código (com permissão correta)
+      # 1. Checkout do código
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
+          ref: develop
 
       # 2. Setup PHP
       - name: Setup PHP
@@ -28,11 +31,11 @@ jobs:
         with:
           php-version: 8.1
 
-      # 3. Instalar dependências PHP
+      # 3. Instalar dependências
       - name: Install dependencies
         run: composer install --no-interaction --prefer-dist
 
-      # 4. Criar diretório de reports
+      # 4. Criar pasta de relatórios
       - name: Prepare reports folder
         run: mkdir -p reports
 
@@ -45,23 +48,26 @@ jobs:
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
 
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
-          | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          | sudo tee /etc/apt/sources.list.d/trivy.list
 
           sudo apt-get update
           sudo apt-get install -y trivy
 
-      # 6. Rodar scan de segurança
+      # 6. Rodar scan
       - name: Run Trivy scan
-        run: trivy fs . -f json -o reports/report.json
+        run: |
+          trivy fs . \
+            --format json \
+            --output reports/report.json
 
-      # 7. Upload do relatório como artifact (backup)
+      # 7. Upload artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report-json
           path: reports/report.json
 
-      # 8. Commit e push do relatório no repositório (CORRIGIDO)
+      # 8. Commitar relatório automaticamente na develop
       - name: Commit and push report
         run: |
           git config --global user.name "github-actions"
@@ -69,11 +75,8 @@ jobs:
 
           git add reports/report.json
 
-          # evita falha se não houver mudanças
-          git commit -m "Atualiza relatório Trivy" || echo "Sem alterações para commit"
+          git commit -m "Atualiza relatório Trivy" || echo "Sem alterações"
 
-          # sincroniza com o repositório remoto antes do push
-          git pull --rebase origin main
+          git pull --rebase origin develop
 
-          # push seguro (sem 403 e sem conflito)
-          git push origin main
+          git push origin HEAD:develop
