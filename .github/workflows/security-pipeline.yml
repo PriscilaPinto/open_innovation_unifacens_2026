@@ -9,6 +9,10 @@ on:
 
   workflow_dispatch:
 
+  # Executa automaticamente 1 vez por dia
+  schedule:
+    - cron: "0 3 * * *"
+
 permissions:
   contents: write
 
