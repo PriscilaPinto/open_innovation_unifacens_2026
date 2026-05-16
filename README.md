@@ -2,8 +2,6 @@
 
 Framework experimental para remediação autônoma de vulnerabilidades em aplicações legadas utilizando IA Generativa, SCA e DevSecOps.
 
----
-
 ## Objetivo
 
 O projeto propõe uma esteira automatizada capaz de:
@@ -15,29 +13,9 @@ O projeto propõe uma esteira automatizada capaz de:
 - executar pipelines de segurança automatizados
 - abrir Pull Requests automaticamente
 
----
-
 ## Arquitetura
 
-```text
-Legacy PHP Application
-        ↓
-GitHub Actions CI/CD
-        ↓
-Trivy SCA Scan
-        ↓
-JSON Vulnerability Report
-        ↓
-AI Security Agent
-        ↓
-Automated Remediation
-        ↓
-SCA Revalidation
-        ↓
-Pull Request / Security Ticket
-```
-
----
+Legacy PHP Application → GitHub Actions CI/CD → Trivy SCA Scan → JSON Vulnerability Report → AI Security Agent → Automated Remediation → SCA Revalidation → Pull Request / Security Ticket
 
 ## Stack
 
@@ -49,85 +27,49 @@ Pull Request / Security Ticket
 - Ubuntu 22.04
 - git version 2.54.0.windows.1
 
----
-
 ## Dependências Vulneráveis
 
 | Biblioteca | Versão |
-|---|---|
-| Guzzle | 6.3.0 |
-| Monolog | 1.24.0 |
-
----
+|------------|--------|
+| Guzzle     | 6.3.0  |
+| Monolog    | 1.24.0 |
 
 ## Pipeline DevSecOps
 
-O projeto utiliza GitHub Actions para automação de análise de vulnerabilidades em dependências PHP.
+O pipeline automatiza análise de vulnerabilidades em dependências PHP usando GitHub Actions.
 
-O pipeline executa automaticamente:
+Executa:
 
-1. checkout do repositório
-2. instalação das dependências PHP
-3. instalação do Trivy
-4. análise SCA do projeto
-5. geração de relatório JSON
-6. upload do relatório como artifact
-7. persistência automática do relatório no repositório
+- checkout do repositório
+- instalação das dependências PHP
+- instalação do Trivy
+- análise SCA
+- geração de relatório JSON
+- upload como artifact
+- persistência no repositório
 
-Relatórios são armazenados em:
-
-```text
-reports/report.json
-```
-
----
+Relatório salvo em: reports/report.json
 
 ## Execução Local
 
-### Instalar dependências
-
-```bash
 composer install
-```
 
-### Executar aplicação
-
-```bash
 php -S localhost:8000
-```
 
-### Executar análise SCA localmente
-
-```bash
 mkdir -p reports
-
-trivy fs . \
-  --format json \
-  --output reports/report.json
-```
-
----
+trivy fs . --format json --output reports/report.json
 
 ## GitHub Actions
 
-O workflow de segurança está localizado em:
+Workflow: .github/workflows/security-scan.yml
 
-```text
-.github/workflows/security-scan.yml
-```
-
-O pipeline é executado automaticamente em:
-
-- push para branch `main`
+Executado em:
+- push em develop
 - pull requests
-
----
+- workflow_dispatch
+- cron (03:00 UTC)
 
 ## Vulnerabilidades Detectadas
-
-O Trivy identifica vulnerabilidades conhecidas presentes nas dependências vulneráveis do ambiente legado.
-
-Exemplos identificados:
 
 - CVE-2022-29248
 - CVE-2022-31042
@@ -135,34 +77,25 @@ Exemplos identificados:
 - CVE-2022-31090
 - CVE-2022-31091
 
----
-
 ## Roadmap
 
 - [x] Ambiente legado vulnerável
 - [x] Pipeline DevSecOps
 - [x] Trivy SCA
 - [x] Relatórios automatizados
+- [x] Execução diária via cron
 - [ ] Agente IA
 - [ ] Remediação automática
 - [ ] Virtual patching
 - [ ] Revalidação automática
 - [ ] Auto Pull Request
 
----
-
 ## Contexto Acadêmico
 
-Projeto desenvolvido como Trabalho de Conclusão de Curso (TCC) em Segurança Cibernética.
+TCC em Segurança Cibernética.
 
-### Tema
-
-> Remediação Autônoma de Vulnerabilidades em Cadeia de Suprimentos via IA Generativa
-
----
+Tema: Remediação Autônoma de Vulnerabilidades em Cadeia de Suprimentos via IA Generativa
 
 ## Aviso
 
-Projeto exclusivamente acadêmico e laboratorial.
-
-As bibliotecas utilizadas neste ambiente são vulneráveis propositalmente para fins de pesquisa, demonstração de SCA e testes de remediação automatizada.
+Projeto exclusivamente acadêmico e laboratorial. As vulnerabilidades são intencionais para pesquisa e testes.
