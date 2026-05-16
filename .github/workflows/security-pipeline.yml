@@ -3,10 +3,9 @@ name: security-scan
 on:
   push:
     branches:
-      - main
+      - develop
   pull_request:
 
-# 🔐 ESSENCIAL: permite o GitHub Actions escrever no repositório
 permissions:
   contents: write
 
@@ -73,7 +72,7 @@ jobs:
           git commit -m "Atualiza relatório Trivy" || echo "Sem alterações para commit"
 
           # sincroniza com o repositório remoto antes do push
-          git pull --rebase origin main
+          git pull --rebase origin develop
 
           # push seguro (sem 403 e sem conflito)
-          git push origin main
+          git push origin develop
