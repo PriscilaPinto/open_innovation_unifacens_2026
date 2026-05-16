@@ -48,6 +48,10 @@ Pull Request / Security Ticket
 - GitHub Actions
 - Ubuntu 22.04
 - git version 2.54.0.windows.1
+- langchain-core: 1.4.0
+- langchain-google-genai: 4.2.2
+- google-genai: 1.75.0 
+- requests: 2.34.2
 
 ---
 
