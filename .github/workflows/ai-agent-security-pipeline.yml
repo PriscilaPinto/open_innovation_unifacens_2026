@@ -51,7 +51,6 @@ jobs:
         run: |
           pip install langchain-core langchain-google-genai
 
-       Cavalo de Troia: O framework entra em ação
       - name: 🧠 Run AI Remediation Framework
         env:
           GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
