@@ -32,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y trivy
 
-      - name: Run Trivy scan (Váre a raiz buscando qualquer linguagem)
+      - name: Run Trivy scan (Varre a raiz buscando qualquer linguagem)
         run: |
           mkdir -p reports
           trivy fs . --format json --output reports/report.json
@@ -104,6 +104,14 @@ jobs:
           scan-ref: '.'
           format: 'table'
           severity: 'CRITICAL,HIGH'
+
+      # 🛡️ EXPURGO CRÍTICO: Remove o banco de dados gigante de 1GB do Trivy antes que a action do PR tente rastrear alterações
+      - name: 🧹 Evitar Vazamento de Cache (Clean Trivy Assets)
+        run: |
+          echo "Limpando artefatos pesados e arquivos de ambiente do Trivy..."
+          rm -rf .cache/
+          rm -rf trivy_envs.txt
+          echo "Diretório limpo com sucesso!"
 
       - name: 🚀 Create Pull Request to Homolog
         uses: peter-evans/create-pull-request@v6
