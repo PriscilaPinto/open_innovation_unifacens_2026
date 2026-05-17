@@ -5,10 +5,7 @@ on:
     branches:
       - develop
   schedule:
-    # ⏰ Cron configurado para rodar todos os dias à meia-noite (Horário UTC)
-    # Sinta-se à vontade para ajustar a expressão cron para os seus testes
     - cron: '0 0 * * *'
-  
   workflow_dispatch:
 
 permissions:
@@ -23,7 +20,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: develop # 👈 OBRIGA o Cron a rodar olhando sempre para a base da develop
+          ref: develop
           fetch-depth: 0
 
       - name: Setup PHP Environment
@@ -37,16 +34,14 @@ jobs:
       - name: Prepare reports folder
         run: mkdir -p reports
 
-      # Passo 1: Mudamos para a Action oficial (Evita o erro de sintaxe do apt-get)
       - name: 🔍 Run Trivy Scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v2.0.2
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'json'
           output: 'reports/report.json'
 
-      # Configura o Python para a IA rodar
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -56,26 +51,30 @@ jobs:
         run: |
           pip install langchain-core langchain-google-genai
 
-      # Passo 2: O seu framework.py entra em ação, lê o JSON e roda o update do Composer
+       Cavalo de Troia: O framework entra em ação
       - name: 🧠 Run AI Remediation Framework
         env:
           GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python framework.py
 
-      # Passo 3: Sandbox Anti-Crash - Testa se o novo lock não quebrou a instalação do PHP
       - name: 🧪 Sandbox - Teste de Instalação Pós-Patch
         run: composer install --no-interaction --dry-run
 
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        branch: fix/ai-autonomous-patch
-        base: homolog
-        title: "🤖 [AI SCA Remediation] Atualização autônoma de dependências vulneráveis"
-        body: |
-          ## 🛡️ Remediação Autônoma Baseada em IA (SCA)
-          Este Pull Request foi gerado automaticamente pelo **Framework de Correção Baseado em Generative AI**.
+      - name: Clean Cache
+        run: rm -rf .cache/
 
-          ### 📊 Evidências e Validações:
-          - **Análise de Dependências:** `composer.json` e `composer.lock` atualizados estrategicamente pela IA.
-          - **Sandbox Integration Test:** Executado com sucesso no runner da esteira.
-        commit-message: "fix: atualiza pacotes vulneráveis via IA (SCA)"
+      - name: 🚀 Create Pull Request to Homolog
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: fix/ai-autonomous-patch
+          base: homolog
+          title: "🤖 [AI SCA Remediation] Atualização autônoma de dependências vulneráveis"
+          body: |
+            ## 🛡️ Remediação Autônoma Baseada em IA (SCA)
+            Este Pull Request foi gerado automaticamente pelo **Framework de Correção Baseado em Generative AI**.
+
+            ### 📊 Evidências e Validações:
+            - **Análise de Dependências:** `composer.json` e `composer.lock` atualizados estrategicamente pela IA.
+            - **Sandbox Integration Test:** Executado com sucesso no runner da esteira.
+          commit-message: "fix: atualiza pacotes vulneráveis via IA (SCA)"
