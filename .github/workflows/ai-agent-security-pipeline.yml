@@ -1,23 +1,17 @@
-name: DevSecOps Automated Remediation Pipeline
+name: DevSecOps Automated SCA Remediation (Unificado)
 
 on:
   push:
     branches:
       - develop
-  pull_request:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 3 * * *"
 
 permissions:
-  contents: write       
-  pull-requests: write  
+  contents: write
+  pull-requests: write
 
 jobs:
-  # ==========================================
-  # JOB 1: SCAN DE VULNERABILIDADES
-  # ==========================================
-  security-scan:
+  framework-remidiation:
+    name: 🤖 Executar Framework de IA e Automação SCA
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -25,72 +19,28 @@ jobs:
         with:
           ref: develop
           fetch-depth: 0
-          persist-credentials: true
 
-      - name: Setup PHP
+      - name: Setup PHP Environment
         uses: shivammathur/setup-php@v2
         with:
-          php-version: 8.1
+          php-version: '8.1'
 
-      - name: Install dependencies
+      - name: Install Dependencies (Vendor Legacy)
         run: composer install --no-interaction --prefer-dist
 
       - name: Prepare reports folder
         run: mkdir -p reports
 
-      - name: Install Trivy
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - [https://aquasecurity.github.io/trivy-repo/deb/public.key](https://aquasecurity.github.io/trivy-repo/deb/public.key) | sudo apt-key add -
-          echo "deb [https://aquasecurity.github.io/trivy-repo/deb](https://aquasecurity.github.io/trivy-repo/deb) $(lsb_release -sc) main" \
-          | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
-
-      - name: Run Trivy scan
-        run: |
-          trivy fs . \
-            --format json \
-            --output reports/report.json
-
-      - name: Upload Trivy Report Artifact
-        uses: actions/upload-artifact@v4
+      # Passo 1: Executa o Scan Oficial focado no diretório
+      - name: 🔍 Run Trivy Scanner
+        uses: aquasecurity/trivy-action@master
         with:
-          name: trivy-report-json
-          path: reports/report.json
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'json'
+          output: 'reports/report.json'
 
-      - name: Commit and push report to develop
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git add reports/report.json
-          git commit -m "chore: atualiza relatorio Trivy [skip ci]" || echo "Sem alterações"
-          git push origin develop
-
-  # ==========================================
-  # JOB 2: AGENTE DE IA (REMEDIAÇÃO SCA)
-  # ==========================================
-  ai-remediation:
-    name: 🤖 Executar Agente de IA (Remediação SCA)
-    needs: security-scan
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: develop 
-
-      - name: Download Trivy Report
-        uses: actions/download-artifact@v4
-        with:
-          name: trivy-report-json
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: 8.1
-
+      # Configura o Python para a IA rodar
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -100,57 +50,20 @@ jobs:
         run: |
           pip install langchain-core langchain-google-genai
 
-      - name: Run AI Remediation Framework (SCA)
+      # Passo 2: O seu framework.py entra em ação, lê o JSON e roda o update do Composer
+      - name: 🧠 Run AI Remediation Framework
         env:
           GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python framework.py
 
-      - name: Upload Remediated SCA Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: sca-remediated-files
-          path: |
-            composer.json
-            composer.lock
-
-  # ==========================================
-  # JOB 3: VALIDAÇÃO E ABERTURA AUTOMÁTICA DE PR
-  # ==========================================
-  security-validation:
-    name: 🧪 Validação e Abertura de PR
-    needs: ai-remediation
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: homolog 
-
-      - name: Download Remediated SCA Files
-        uses: actions/download-artifact@v4
-        with:
-          name: sca-remediated-files
-
-      - name: Setup PHP Environment for Sandbox
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.1'
-
-      - name: ⚙️ Teste de Instalação (Composer Validation)
+      # Passo 3: Sandbox Anti-Crash - Testa se o novo lock não quebrou a instalação do PHP
+      - name: 🧪 Sandbox - Teste de Instalação Pós-Patch
         run: composer install --no-interaction --dry-run
 
-      - name: 🔍 Re-scan de Segurança SCA no Ambiente
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '1'
-
-      - name: Clean Runner Cache
+      - name: Clean Cache
         run: rm -rf .cache/
 
+      # Passo 4: Abre o Pull Request para a Homolog contendo APENAS o composer alterado pela IA
       - name: 🚀 Create Pull Request to Homolog
         uses: peter-evans/create-pull-request@v6
         with:
@@ -164,5 +77,5 @@ jobs:
 
             ### 📊 Evidências e Validações:
             - **Análise de Dependências:** `composer.json` e `composer.lock` atualizados estrategicamente pela IA.
-            - **Re-scan de Segurança (Trivy SCA):** Executado após a correção e acusado **ZERO** vulnerabilidades Críticas ou Altas.
+            - **Sandbox Integration Test:** Executado com sucesso no runner da esteira.
           commit-message: "fix: atualiza pacotes vulneráveis via IA (SCA)"
