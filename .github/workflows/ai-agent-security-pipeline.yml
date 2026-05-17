@@ -5,13 +5,12 @@ on:
     branches:
       - develop
   pull_request:
-  workflow_dispatch: # 🚀 Mantido para tu testares clicando no botão quando quiseres!
+  workflow_dispatch: # 🚀 Permite rodar manualmente clicando no botão para testar agora
   schedule:
-    - cron: "0 3 * * *" # ⏰ O teu cron original das 03:00 UTC
+    - cron: "0 3 * * *" # ⏰ Cron mantido para as 03:00 UTC
 
-# PRIVILÉGIO MÍNIMO: Permissões de escrita concedidas explicitamente via código apenas para este Workflow
 permissions:
-  contents: write        # Necessário para criar a branch temporária de correção e commitar
+  contents: write       # Necessário para criar a branch temporária de correção e commitar
   pull-requests: write  # Necessário para abrir o Pull Request automaticamente contra a homolog
 
 jobs:
@@ -19,6 +18,7 @@ jobs:
   # JOB 1: SCAN DE VULNERABILIDADES
   # ==========================================
   security-scan:
+    name: 🔍 Scan de Vulnerabilidades (Trivy)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -53,7 +53,6 @@ jobs:
             --format json \
             --output reports/report.json
 
-      # Upload do relatório para o Job da IA consumir
       - name: Upload Trivy Report Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -61,7 +60,7 @@ jobs:
           path: reports/report.json
 
   # ==========================================
-  # JOB 2: AGENTE DE IA (GERAÇÃO DO PATCH)
+  # JOB 2: AGENTE DE IA (REMEDIAÇÃO SCA)
   # ==========================================
   ai-remediation:
     name: 🤖 Executar Agente de IA (Remediação)
@@ -92,11 +91,14 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python framework.py
 
-      - name: Upload Remediated File Artifact
+      # 🔄 CORREÇÃO: Sobe os arquivos reais do Composer modificados pelo script Python
+      - name: Upload Remediated Composer Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: remediated-php-file
-          path: index_remediated.php
+          name: remediated-composer-files
+          path: |
+            composer.json
+            composer.lock
 
   # ==========================================
   # JOB 3: VALIDAÇÃO E ABERTURA AUTOMÁTICA DE PR
@@ -109,52 +111,46 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: homolog # FAZ O CHECKOUT NA HOMOLOG PARA PREPARAR O PATCH SOBRE ELA
+          ref: homolog # Faz o checkout mirando na homolog para aplicar as correções em cima dela
 
-      - name: Download Remediated File
+      - name: Download Remediated Composer Files
         uses: actions/download-artifact@v4
         with:
-          name: remediated-php-file
+          name: remediated-composer-files
 
       - name: Setup PHP Environment for Sandbox
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.3'
+          php-version: '8.1'
 
-      - name: ⚙️ Teste de Sintaxe (PHP Lint)
-        run: php -l index_remediated.php
+      # Valida no Sandbox se as atualizações da IA instalam perfeitamente sem quebrar o ambiente
+      - name: 🧪 Sandbox - Teste de Instalação Pós-Patch
+        run: composer install --no-interaction --dry-run
 
-      - name: 🔍 Re-scan de Segurança no Código da IA
+      - name: 🔍 Re-scan de Segurança no Composer da IA
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
-          scan-ref: 'index_remediated.php'
+          scan-ref: '.'
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '1' # Se o patch da IA falhar e as CVEs continuarem lá, a esteira quebra aqui!
 
-      # PASSO DE INFRAESTRUTURA: Aplica o patch substituto e limpa a pasta oculta de cache gerada pelo Trivy
-      - name: Apply AI Patch and Clean Cache
-        run: |
-          cp index_remediated.php index.php
-          rm index_remediated.php
-          rm -rf .cache/
+      - name: Clean Cache
+        run: rm -rf .cache/
 
-      # PASSO DE CRIAÇÃO DO PR: Abre o PR de forma automatizada usando o token com permissão declarada
       - name: 🚀 Create Pull Request to Homolog
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: fix/ai-autonomous-patch
-          base: homolog # ALVO DO PR: Branch de homologação segura
-          title: "🤖 [AI Remediation] Virtual Patching para mitigação de CVEs"
+          base: homolog
+          title: "🤖 [AI SCA Remediation] Atualização autônoma de dependências vulneráveis"
           body: |
-            ## 🛡️ Remediação Autônoma Baseada em IA
+            ## 🛡️ Remediação Autônoma Baseada em IA (SCA)
             Este Pull Request foi gerado automaticamente pelo **Framework de Correção Baseado em Generative AI**.
 
             ### 📊 Evidências e Validações:
-            - **Análise Sintática (`php -l`):** Passou com sucesso em ambiente sandbox (PHP 8.3).
+            - **Sandbox Integration Test (`composer install --dry-run`):** Executado com sucesso no runner da esteira.
             - **Re-scan de Segurança (Trivy):** Executado após a correção e acusou **ZERO** vulnerabilidades Críticas ou Altas.
-
-            _Por favor, revise as alterações de código e aprove o Merge para a branch de homologação (`homolog`)._
-          commit-message: "fix: aplica patch autonomo gerado pela IA"
+          commit-message: "fix: atualiza pacotes vulneráveis via IA (SCA)"

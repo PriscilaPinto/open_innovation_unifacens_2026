@@ -59,13 +59,13 @@ def executar_framework_autonomo():
     chain = prompt_template | llm | StrOutputParser()
 
     print("🧠 [FASE 2] IA calculando atualizações de pacotes...")
-    comandos_remediacao = chain.invoke({
+    commands_remediation = chain.invoke({
         "composer_json": composer_atual,
         "vulns": json.dumps(vulnerabilities, indent=2)
     })
 
     print("\n🖥️ [FASE 3] Executando comandos de remediação:")
-    linhas_comandos = [cmd.strip() for cmd in comandos_remediacao.strip().split('\n') if cmd.strip()]
+    linhas_comandos = [cmd.strip() for cmd in commands_remediation.strip().split('\n') if cmd.strip()]
 
     sucesso_automacao = True
     for comando in linhas_comandos:
@@ -73,10 +73,16 @@ def executar_framework_autonomo():
             print(f"🚀 Executando comando de terminal: {comando}")
             try:
                 args = comando.split()
+                
+                # 🛡️ INJEÇÃO DE FLAGS DE RESILIÊNCIA DEVSECOPS (Força o Guzzle e subdependências a atualizarem)
                 if "--no-interaction" not in args:
                     args.append("--no-interaction")
+                if "--with-dependencies" not in args:
+                    args.append("--with-dependencies")
+                if "--ignore-platform-reqs" not in args:
+                    args.append("--ignore-platform-reqs")
                 
-                # Executa a atualização real do pacote no ambiente isolado do runner
+                # Executa a atualização real do pacote alterando o composer.json/lock do runner
                 subprocess.run(args, capture_output=True, text=True, check=True)
                 print(f"✅ Sucesso na execução do update!")
             except subprocess.CalledProcessError as e:
