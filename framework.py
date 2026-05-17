@@ -1,55 +1,60 @@
 import json
 import os
-import subprocess
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-def executar_framework_autonomo():
-    print("\n🤖 [FASE 1] Iniciando Framework de Remediação Autônoma (Foco Puro: SCA)...")
+def executar_virtual_patching_escalavel():
+    print("\n🤖 [FASE 1] Iniciando Framework de Virtual Patching Agnóstico e Escalável...")
 
     report_path = 'reports/report.json'
-    composer_json_path = 'composer.json'
 
     if not os.path.exists(report_path):
         print("❌ Erro: Relatório 'reports/report.json' não encontrado.")
         return
 
-    if not os.path.exists(composer_json_path):
-        print(f"❌ Erro: O arquivo '{composer_json_path}' não existe.")
-        return
-
-    # Lendo dados do Trivy
     with open(report_path, 'r', encoding='utf-8') as f:
         trivy_data = json.load(f)
 
     vulnerabilities = []
+    ecossistema = "Desconhecido"
+    arquivo_alvo_sugerido = "patch_seguranca"
+
+    # Identifica dinamicamente o ecossistema com base no relatório do Trivy
     for result in trivy_data.get('Results', []):
+        target_type = result.get('Type', '').lower()
         if 'Vulnerabilities' in result:
             vulnerabilities.extend(result['Vulnerabilities'])
+            
+        if 'composer' in target_type:
+            ecossistema = "PHP (Composer)"
+            arquivo_alvo_sugerido = "virtual_patch_bootstrap.php"
+        elif 'npm' in target_type or 'yarn' in target_type:
+            ecossistema = "Node.js (NPM)"
+            arquivo_alvo_sugerido = "virtual_patch_middleware.js"
+        elif 'pip' in target_type or 'poetry' in target_type:
+            ecossistema = "Python (PIP)"
+            arquivo_alvo_sugerido = "virtual_patch_interceptor.py"
 
     if not vulnerabilities:
-        print("✅ Nenhuma vulnerabilidade de dependência (SCA) encontrada.")
+        print("✅ Nenhuma vulnerabilidade detectada no repositório legado.")
         return
 
-    print(f"🔍 Mapeadas {len(vulnerabilities)} vulnerabilidades de SCA no ambiente.")
-
-    with open(composer_json_path, 'r', encoding='utf-8') as f:
-        composer_atual = f.read()
+    print(f"📦 Ecossistema Detectado Automaticamente: {ecossistema}")
+    print(f"🔍 Mapeadas {len(vulnerabilities)} vulnerabilidades para mitigação.")
 
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
 
     prompt_template = PromptTemplate.from_template(
         """
-        Você é um agente de IA especialista em DevSecOps e gerenciamento de dependências (SCA).
-        Sua missão é propor os comandos exatos de atualização do Composer para sanar as CVEs listadas.
+        Você é um agente de IA sênior especialista em AppSec, DevSecOps e Arquitetura de Software.
+        Sua missão é criar um arquivo de VIRTUAL PATCHING autônomo para mitigar as vulnerabilidades encontradas no ecossistema informado.
 
-        [DIRETRIZES OBRIGATÓRIAS]
-        1. Proponha comandos cirúrgicos usando `composer update <nome-do-pacote>`.
-        2. FORMATO DE SAÍDA: Retorne APENAS as linhas de comando prontas para execução. Não inclua markdown (```bash) ou textos explicativos.
-
-        [ARQUIVO COMPOSER.JSON ATUAL]
-        {composer_json}
+        [DIRETRIZES DE ARQUITETURA]
+        1. Você deve gerar um arquivo isolado de proteção (um patch/interceptador/middleware) específico para o ecossistema: {ecossistema}.
+        2. Esse arquivo deve conter regras de segurança (como sanitização de inputs, validação de cabeçalhos ou bloqueio de payloads maliciosos) projetadas especificamente para neutralizar as CVEs listadas.
+        3. O objetivo é que este arquivo seja incluído no ponto de entrada do sistema legado para agir como um escudo, sem alterar as bibliotecas originais.
+        4. FORMATO DE SAÍDA: Retorne APENAS o código puríssimo do arquivo protetivo, pronto para ser salvo. Não use marcações de markdown (como ```php ou ```javascript) e não escreva explicações textuais.
 
         [RELATÓRIO DE VULNERABILIDADES DO TRIVY]
         {vulns}
@@ -58,41 +63,25 @@ def executar_framework_autonomo():
 
     chain = prompt_template | llm | StrOutputParser()
 
-    print("🧠 [FASE 2] IA calculando atualizações de pacotes...")
-    commands_remediation = chain.invoke({
-        "composer_json": composer_atual,
+    print(f"🧠 [FASE 2] IA calculando e projetando o Virtual Patch para {ecossistema}...")
+    codigo_patch = chain.invoke({
+        "ecossistema": ecossistema,
         "vulns": json.dumps(vulnerabilities, indent=2)
     })
 
-    print("\n🖥️ [FASE 3] Executando comandos de remediação:")
-    linhas_comandos = [cmd.strip() for cmd in commands_remediation.strip().split('\n') if cmd.strip()]
+    # Sanitize para garantir que nenhuma tag de markdown quebre o arquivo gerado
+    codigo_limpo = codigo_patch.replace("```php", "").replace("```javascript", "").replace("```python", "").replace("```", "").strip()
 
-    sucesso_automacao = True
-    for comando in linhas_comandos:
-        if "composer update" in comando:
-            print(f"🚀 Executando comando de terminal: {comando}")
-            try:
-                args = comando.split()
-                
-                # 🛡️ INJEÇÃO DE FLAGS DE RESILIÊNCIA DEVSECOPS (Força o Guzzle e subdependências a atualizarem)
-                if "--no-interaction" not in args:
-                    args.append("--no-interaction")
-                if "--with-dependencies" not in args:
-                    args.append("--with-dependencies")
-                if "--ignore-platform-reqs" not in args:
-                    args.append("--ignore-platform-reqs")
-                
-                # Executa a atualização real do pacote alterando o composer.json/lock do runner
-                subprocess.run(args, capture_output=True, text=True, check=True)
-                print(f"✅ Sucesso na execução do update!")
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Falha ao rodar: {comando}. Erro: {e.stderr}")
-                sucesso_automacao = False
+    # Salva o arquivo dinamicamente com o nome e extensão corretos da tecnologia detectada
+    print(f"💾 [FASE 3] Gravando o escudo protetivo autônomo: {arquivo_alvo_sugerido}")
+    with open(arquivo_alvo_sugerido, 'w', encoding='utf-8') as f:
+        f.write(codigo_limpo)
+        
+    # Salva um arquivo de metadados para o pipeline do GitHub Actions saber o que foi gerado
+    with open('patch_meta.json', 'w', encoding='utf-8') as f:
+        json.dump({"arquivo_gerado": arquivo_alvo_sugerido, "ecossistema": ecossistema}, f)
 
-    if sucesso_automacao:
-        print("\n💾 [FASE 4] Remediação SCA concluída com sucesso nos arquivos do Composer!")
-    else:
-        print("\n⚠️ Algumas dependências falharam na atualização automática. Revisar logs.")
+    print(f"✅ [FASE 4] Virtual Patching concluído com sucesso para a tecnologia {ecossistema}!")
 
 if __name__ == "__main__":
-    executar_framework_autonomo()
+    executar_virtual_patching_escalavel()

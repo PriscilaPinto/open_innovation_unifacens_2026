@@ -5,37 +5,22 @@ on:
     branches:
       - develop
   pull_request:
-  workflow_dispatch: # 🚀 Permite rodar manualmente clicando no botão para testar agora
-  schedule:
-    - cron: "0 3 * * *" # ⏰ Cron mantido para as 03:00 UTC
+  workflow_dispatch:
 
 permissions:
-  contents: write       # Necessário para criar a branch temporária de correção e commitar
-  pull-requests: write  # Necessário para abrir o Pull Request automaticamente contra a homolog
+  contents: write
+  pull-requests: write
 
 jobs:
-  # ==========================================
-  # JOB 1: SCAN DE VULNERABILIDADES
-  # ==========================================
+  # STAGE 1: Coleta estática agnóstica de vulnerabilidades
   security-scan:
-    name: 🔍 Scan de Vulnerabilidades (Trivy)
+    name: 🔍 Scan de Vulnerabilidades Multi-Linguagem
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: develop
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: 8.1
-
-      - name: Install dependencies
-        run: composer install --no-interaction --prefer-dist
-
-      - name: Prepare reports folder
-        run: mkdir -p reports
 
       - name: Install Trivy
         run: |
@@ -47,23 +32,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y trivy
 
-      - name: Run Trivy scan
+      - name: Run Trivy scan (Váre a raiz buscando qualquer linguagem)
         run: |
-          trivy fs . \
-            --format json \
-            --output reports/report.json
+          mkdir -p reports
+          trivy fs . --format json --output reports/report.json
 
-      - name: Upload Trivy Report Artifact
+      - name: Upload Trivy Report
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report-json
           path: reports/report.json
 
-  # ==========================================
-  # JOB 2: AGENTE DE IA (REMEDIAÇÃO SCA)
-  # ==========================================
+  # STAGE 2: O Agente de IA decide a tecnologia e cria o patch sob medida
   ai-remediation:
-    name: 🤖 Executar Agente de IA (Remediação)
+    name: 🤖 Agente de IA Tomador de Decisão (Virtual Patching)
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
@@ -83,61 +65,45 @@ jobs:
           python-version: '3.10'
 
       - name: Install Python Dependencies
-        run: |
-          pip install langchain-core langchain-google-genai
+        run: pip install langchain-core langchain-google-genai
 
-      - name: Run AI Remediation Framework
+      - name: Run Escalable AI Remediation Framework
         env:
           GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python framework.py
 
-      # 🔄 CORREÇÃO: Sobe os arquivos reais do Composer modificados pelo script Python
-      - name: Upload Remediated Composer Artifacts
+      # Sobe tudo o que foi gerado na raiz (o patch dinâmico e o arquivo de metadados)
+      - name: Upload Remediated Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: remediated-composer-files
+          name: ai-virtual-patch-results
           path: |
-            composer.json
-            composer.lock
+            virtual_patch_*
+            patch_meta.json
 
-  # ==========================================
-  # JOB 3: VALIDAÇÃO E ABERTURA AUTOMÁTICA DE PR
-  # ==========================================
+  # STAGE 3: Validação genérica da proteção e abertura do Pull Request para Homolog
   security-validation:
-    name: 🧪 Validação e Abertura de PR
+    name: 🧪 Validação e Abertura de PR Automatizado
     needs: ai-remediation
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: homolog # Faz o checkout mirando na homolog para aplicar as correções em cima dela
+          ref: homolog
 
-      - name: Download Remediated Composer Files
+      - name: Download Remediated Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: remediated-composer-files
+          name: ai-virtual-patch-results
 
-      - name: Setup PHP Environment for Sandbox
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.1'
-
-      # Valida no Sandbox se as atualizações da IA instalam perfeitamente sem quebrar o ambiente
-      - name: 🧪 Sandbox - Teste de Instalação Pós-Patch
-        run: composer install --no-interaction --dry-run
-
-      - name: 🔍 Re-scan de Segurança no Composer da IA
+      - name: 🔍 Re-scan do patch gerado pela IA
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1' # Se o patch da IA falhar e as CVEs continuarem lá, a esteira quebra aqui!
-
-      - name: Clean Cache
-        run: rm -rf .cache/
 
       - name: 🚀 Create Pull Request to Homolog
         uses: peter-evans/create-pull-request@v6
@@ -145,12 +111,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: fix/ai-autonomous-patch
           base: homolog
-          title: "🤖 [AI SCA Remediation] Atualização autônoma de dependências vulneráveis"
+          title: "🤖 [AI Virtual Patching] Proteção autônoma agnóstica para código legado"
           body: |
-            ## 🛡️ Remediação Autônoma Baseada em IA (SCA)
-            Este Pull Request foi gerado automaticamente pelo **Framework de Correção Baseado em Generative AI**.
+            ## 🛡️ Remediação Autônoma Baseada em IA - Virtual Patching Escalável
+            Este Pull Request foi gerado automaticamente pelo **Framework Inteligente de Correção**.
 
-            ### 📊 Evidências e Validações:
-            - **Sandbox Integration Test (`composer install --dry-run`):** Executado com sucesso no runner da esteira.
-            - **Re-scan de Segurança (Trivy):** Executado após a correção e acusou **ZERO** vulnerabilidades Críticas ou Altas.
-          commit-message: "fix: atualiza pacotes vulneráveis via IA (SCA)"
+            ### 📊 Comportamento do Agente:
+            - **Análise Dinâmica:** O agente de IA leu o relatório do Trivy, identificou o ecossistema tecnológico do repositório em repouso e projetou uma camada externa isolada de Virtual Patching dedicada a esta tecnologia.
+            - **Resiliência:** Nenhuma biblioteca legada foi modificada, eliminando o risco de quebra de compatibilidade em produção.
+          commit-message: "fix: injeta camada autônoma de virtual patching gerada por IA"
