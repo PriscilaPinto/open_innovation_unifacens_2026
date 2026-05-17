@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - develop
+  schedule:
+    # ⏰ Cron configurado para rodar todos os dias à meia-noite (Horário UTC)
+    # Sinta-se à vontade para ajustar a expressão cron para os seus testes
+    - cron: '0 0 * * *'
+  
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -17,7 +23,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: develop # 👈 OBRIGA o Cron a rodar olhando sempre para a base da develop
           fetch-depth: 0
 
       - name: Setup PHP Environment
@@ -31,7 +37,7 @@ jobs:
       - name: Prepare reports folder
         run: mkdir -p reports
 
-      # Passo 1: Executa o Scan Oficial focado no diretório
+      # Passo 1: Mudamos para a Action oficial (Evita o erro de sintaxe do apt-get)
       - name: 🔍 Run Trivy Scanner
         uses: aquasecurity/trivy-action@master
         with:
@@ -60,22 +66,16 @@ jobs:
       - name: 🧪 Sandbox - Teste de Instalação Pós-Patch
         run: composer install --no-interaction --dry-run
 
-      - name: Clean Cache
-        run: rm -rf .cache/
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        branch: fix/ai-autonomous-patch
+        base: homolog
+        title: "🤖 [AI SCA Remediation] Atualização autônoma de dependências vulneráveis"
+        body: |
+          ## 🛡️ Remediação Autônoma Baseada em IA (SCA)
+          Este Pull Request foi gerado automaticamente pelo **Framework de Correção Baseado em Generative AI**.
 
-      # Passo 4: Abre o Pull Request para a Homolog contendo APENAS o composer alterado pela IA
-      - name: 🚀 Create Pull Request to Homolog
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          branch: fix/ai-autonomous-patch
-          base: homolog
-          title: "🤖 [AI SCA Remediation] Atualização autônoma de dependências vulneráveis"
-          body: |
-            ## 🛡️ Remediação Autônoma Baseada em IA (SCA)
-            Este Pull Request foi gerado automaticamente pelo **Framework de Correção Baseado em Generative AI**.
-
-            ### 📊 Evidências e Validações:
-            - **Análise de Dependências:** `composer.json` e `composer.lock` atualizados estrategicamente pela IA.
-            - **Sandbox Integration Test:** Executado com sucesso no runner da esteira.
-          commit-message: "fix: atualiza pacotes vulneráveis via IA (SCA)"
+          ### 📊 Evidências e Validações:
+          - **Análise de Dependências:** `composer.json` e `composer.lock` atualizados estrategicamente pela IA.
+          - **Sandbox Integration Test:** Executado com sucesso no runner da esteira.
+        commit-message: "fix: atualiza pacotes vulneráveis via IA (SCA)"

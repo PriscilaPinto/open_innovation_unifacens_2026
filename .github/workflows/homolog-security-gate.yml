@@ -1,9 +1,13 @@
 name: 🛡️ Homolog Post-Merge Security Gate
 
 on:
-  push:
+  pull_request:
     branches:
-      - homolog # Dispara automaticamente assim que o PR da IA for aprovado e fundido aqui
+      - homolog
+    types:
+      - closed # Só acorda quando um PR com destino à homolog for fechado
+  
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,24 +15,19 @@ permissions:
 jobs:
   post-merge-validation:
     name: 🔍 Scan de Validação Pós-Merge
+    # 🔒 CONDICIONAL CRUCIAL: Só roda se o PR foi aceito (MERGED). Se foi fechado/rejeitado, ignora.
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Homolog Branch
         uses: actions/checkout@v4
 
-      - name: Install Trivy
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
-          | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
-
-      - name: Run Final Trivy Scan
-        run: |
-          trivy fs . \
-            --format table \
-            --severity CRITICAL,HIGH \
-            --exit-code 1 # Se o patch da IA falhar e ainda houver vulnerabilidade alta, a esteira quebra aqui
+      # Usando a Action oficial para evitar falhas de pacotes do Ubuntu no runner
+      - name: 🔍 Run Final Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1' # Mantido! Se a IA falhou e o pacote continua vulnerável, a esteira quebra aqui.
