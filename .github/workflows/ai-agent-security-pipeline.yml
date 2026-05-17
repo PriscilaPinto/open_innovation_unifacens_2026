@@ -9,14 +9,13 @@ on:
   schedule:
     - cron: "0 3 * * *"
 
-# PRIVILÉGIO MÍNIMO: Permissões de escrita concedidas explicitamente via código apenas para este Workflow
 permissions:
   contents: write       # Necessário para criar a branch temporária de correção e commitar
   pull-requests: write  # Necessário para abrir o Pull Request automaticamente contra a homolog
 
 jobs:
   # ==========================================
-  # JOB 1: SCAN DE VULNERABILIDADES
+  # JOB 1: SCAN DE VULNERABILIDADES (O primeiro da fila)
   # ==========================================
   security-scan:
     runs-on: ubuntu-latest
@@ -25,6 +24,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: develop
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -53,15 +54,24 @@ jobs:
             --format json \
             --output reports/report.json
 
-      # Upload do relatório para o Job da IA consumir
+      # Upload do relatório para o Job da IA consumir com segurança
       - name: Upload Trivy Report Artifact
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report-json
           path: reports/report.json
 
+      # NOVO: Sincroniza o relatório na develop ANTES da IA começar
+      - name: Commit and push report to develop
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add reports/report.json
+          git commit -m "chore: atualiza relatorio Trivy [skip ci]" || echo "Sem alterações"
+          git push origin develop
+
   # ==========================================
-  # JOB 2: AGENTE DE IA (GERAÇÃO DO PATCH)
+  # JOB 2: AGENTE DE IA (Só começa quando o Job 1 terminar de dar o push!)
   # ==========================================
   ai-remediation:
     name: 🤖 Executar Agente de IA (Remediação)
@@ -71,7 +81,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: develop # Baixa o código já com o report.json atualizado pelo Job 1
 
       - name: Download Trivy Report
         uses: actions/download-artifact@v4
@@ -99,7 +109,7 @@ jobs:
           path: index_remediated.php
 
   # ==========================================
-  # JOB 3: VALIDAÇÃO E ABERTURA AUTOMÁTICA DE PR
+  # JOB 3: VALIDAÇÃO E ABERTURA AUTOMÁTICA DE PR (O último da fila)
   # ==========================================
   security-validation:
     name: 🧪 Validação e Abertura de PR
@@ -109,7 +119,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: homolog # FAZ O CHECKOUT NA HOMOLOG PARA PREPARAR O PATCH SOBRE ELA
+          ref: homolog # Prepara o ambiente em cima de homolog para receber o patch
 
       - name: Download Remediated File
         uses: actions/download-artifact@v4
@@ -133,20 +143,18 @@ jobs:
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
 
-      # PASSO DE INFRAESTRUTURA: Aplica o patch substituto e limpa a pasta oculta de cache gerada pelo Trivy
       - name: Apply AI Patch and Clean Cache
         run: |
           cp index_remediated.php index.php
           rm index_remediated.php
           rm -rf .cache/
 
-      # PASSO DE CRIAÇÃO DO PR: Abre o PR de forma automatizada usando o token com permissão declarada
       - name: 🚀 Create Pull Request to Homolog
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: fix/ai-autonomous-patch
-          base: homolog # ALVO DO PR: Branch de homologação segura
+          base: homolog
           title: "🤖 [AI Remediation] Virtual Patching para mitigação de CVEs"
           body: |
             ## 🛡️ Remediação Autônoma Baseada em IA
@@ -155,6 +163,4 @@ jobs:
             ### 📊 Evidências e Validações:
             - **Análise Sintática (`php -l`):** Passou com sucesso em ambiente sandbox (PHP 8.3).
             - **Re-scan de Segurança (Trivy):** Executado após a correção e acusou **ZERO** vulnerabilidades Críticas ou Altas.
-
-            _Por favor, revise as alterações de código e aprove o Merge para a branch de homologação (`homolog`)._
           commit-message: "fix: aplica patch autonomo gerado pela IA"
