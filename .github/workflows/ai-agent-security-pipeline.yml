@@ -1,46 +1,82 @@
-name: DevSecOps Automated SCA Remediation (Unificado)
+name: DevSecOps Automated Remediation Pipeline
 
 on:
   push:
     branches:
       - develop
+  pull_request:
+  workflow_dispatch: # 🚀 Mantido para tu testares clicando no botão quando quiseres!
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: "0 3 * * *" # ⏰ O teu cron original das 03:00 UTC
 
+# PRIVILÉGIO MÍNIMO: Permissões de escrita concedidas explicitamente via código apenas para este Workflow
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write        # Necessário para criar a branch temporária de correção e commitar
+  pull-requests: write  # Necessário para abrir o Pull Request automaticamente contra a homolog
 
 jobs:
-  framework-remidiation:
-    name: 🤖 Executar Framework de IA e Automação SCA
+  # ==========================================
+  # JOB 1: SCAN DE VULNERABILIDADES
+  # ==========================================
+  security-scan:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: develop
-          fetch-depth: 0
 
-      - name: Setup PHP Environment
+      - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.1'
+          php-version: 8.1
 
-      - name: Install Dependencies (Vendor Legacy)
+      - name: Install dependencies
         run: composer install --no-interaction --prefer-dist
 
       - name: Prepare reports folder
         run: mkdir -p reports
 
-      - name: 🔍 Run Trivy Scanner
-        uses: aquasecurity/trivy-action@v2.0.2
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+          | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Run Trivy scan
+        run: |
+          trivy fs . \
+            --format json \
+            --output reports/report.json
+
+      # Upload do relatório para o Job da IA consumir
+      - name: Upload Trivy Report Artifact
+        uses: actions/upload-artifact@v4
         with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'json'
-          output: 'reports/report.json'
+          name: trivy-report-json
+          path: reports/report.json
+
+  # ==========================================
+  # JOB 2: AGENTE DE IA (GERAÇÃO DO PATCH)
+  # ==========================================
+  ai-remediation:
+    name: 🤖 Executar Agente de IA (Remediação)
+    needs: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Download Trivy Report
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-report-json
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -51,29 +87,74 @@ jobs:
         run: |
           pip install langchain-core langchain-google-genai
 
-      - name: 🧠 Run AI Remediation Framework
+      - name: Run AI Remediation Framework
         env:
           GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python framework.py
 
-      - name: 🧪 Sandbox - Teste de Instalação Pós-Patch
-        run: composer install --no-interaction --dry-run
+      - name: Upload Remediated File Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remediated-php-file
+          path: index_remediated.php
 
-      - name: Clean Cache
-        run: rm -rf .cache/
+  # ==========================================
+  # JOB 3: VALIDAÇÃO E ABERTURA AUTOMÁTICA DE PR
+  # ==========================================
+  security-validation:
+    name: 🧪 Validação e Abertura de PR
+    needs: ai-remediation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: homolog # FAZ O CHECKOUT NA HOMOLOG PARA PREPARAR O PATCH SOBRE ELA
 
+      - name: Download Remediated File
+        uses: actions/download-artifact@v4
+        with:
+          name: remediated-php-file
+
+      - name: Setup PHP Environment for Sandbox
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+
+      - name: ⚙️ Teste de Sintaxe (PHP Lint)
+        run: php -l index_remediated.php
+
+      - name: 🔍 Re-scan de Segurança no Código da IA
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'index_remediated.php'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      # PASSO DE INFRAESTRUTURA: Aplica o patch substituto e limpa a pasta oculta de cache gerada pelo Trivy
+      - name: Apply AI Patch and Clean Cache
+        run: |
+          cp index_remediated.php index.php
+          rm index_remediated.php
+          rm -rf .cache/
+
+      # PASSO DE CRIAÇÃO DO PR: Abre o PR de forma automatizada usando o token com permissão declarada
       - name: 🚀 Create Pull Request to Homolog
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: fix/ai-autonomous-patch
-          base: homolog
-          title: "🤖 [AI SCA Remediation] Atualização autônoma de dependências vulneráveis"
+          base: homolog # ALVO DO PR: Branch de homologação segura
+          title: "🤖 [AI Remediation] Virtual Patching para mitigação de CVEs"
           body: |
-            ## 🛡️ Remediação Autônoma Baseada em IA (SCA)
+            ## 🛡️ Remediação Autônoma Baseada em IA
             Este Pull Request foi gerado automaticamente pelo **Framework de Correção Baseado em Generative AI**.
 
             ### 📊 Evidências e Validações:
-            - **Análise de Dependências:** `composer.json` e `composer.lock` atualizados estrategicamente pela IA.
-            - **Sandbox Integration Test:** Executado com sucesso no runner da esteira.
-          commit-message: "fix: atualiza pacotes vulneráveis via IA (SCA)"
+            - **Análise Sintática (`php -l`):** Passou com sucesso em ambiente sandbox (PHP 8.3).
+            - **Re-scan de Segurança (Trivy):** Executado após a correção e acusou **ZERO** vulnerabilidades Críticas ou Altas.
+
+            _Por favor, revise as alterações de código e aprove o Merge para a branch de homologação (`homolog`)._
+          commit-message: "fix: aplica patch autonomo gerado pela IA"
