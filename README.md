@@ -792,14 +792,6 @@ Este projeto é licenciado sob [MIT License](LICENSE).
 
 ---
 
-## 👥 Autora
-
-**Priscila Pinto**  
-📧 41971828+PriscilaPinto@users.noreply.github.com  
-🔗 [@PriscilaPinto](https://github.com/PriscilaPinto)
-
----
-
 ## 🙏 Agradecimentos
 
 - [Aqua Security](https://www.aquasec.com/) - Trivy SCA Scanner
