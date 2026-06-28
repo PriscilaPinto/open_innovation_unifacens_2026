@@ -43,11 +43,30 @@ jobs:
           name: trivy-report-json
           path: reports/report.json
 
-  # STAGE 2: O Agente de IA decide a tecnologia e cria o patch sob medida
+  # STAGE 2: O Agente processa vulnerabilidades e decide remediações
   ai-remediation:
-    name: 🤖 Agente de IA Tomador de Decisão (Virtual Patching)
+    name: 🤖 Processamento e Decisão de Remediação
     needs: security-scan
     runs-on: ubuntu-latest
+    
+    # ==========================================
+    # POSTGRESQL SERVICE CONTAINER
+    # ==========================================
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: remediation
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -58,6 +77,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: trivy-report-json
+          path: reports/
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -65,21 +85,74 @@ jobs:
           python-version: '3.10'
 
       - name: Install Python Dependencies
-        run: pip install langchain-core langchain-google-genai
+        run: pip install -r requirements.txt
 
-      - name: Run Escalable AI Remediation Framework
+      - name: Setup Database Schema
         env:
-          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d remediation -f database/schema.sql
+
+      - name: Seed Homologated Versions (Curated Database)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d remediation -f database/seed_homologated_versions.sql
+
+      - name: Run Remediation Framework
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: remediation
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          USE_CURATED_DB: "true"
         run: python framework.py
 
-      # Sobe tudo o que foi gerado na raiz (o patch dinâmico e o arquivo de metadados)
-      - name: Upload Remediated Artifacts
+      - name: Export Audit Data (for persistence)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          mkdir -p audit_logs
+          
+          # Exportar execuções do pipeline
+          psql -h localhost -U postgres -d remediation -c \
+            "COPY (SELECT * FROM pipeline_executions) TO STDOUT WITH CSV HEADER" \
+            > audit_logs/pipeline_executions_$(date +%Y%m%d_%H%M%S).csv
+          
+          # Exportar vulnerabilidades
+          psql -h localhost -U postgres -d remediation -c \
+            "COPY (SELECT * FROM vulnerability_records) TO STDOUT WITH CSV HEADER" \
+            > audit_logs/vulnerability_records_$(date +%Y%m%d_%H%M%S).csv
+          
+          # Exportar métricas (resumo JSON)
+          psql -h localhost -U postgres -d remediation -t -c \
+            "SELECT json_agg(row_to_json(t)) FROM (
+              SELECT 
+                COUNT(*) as total_vulnerabilities,
+                COUNT(*) FILTER (WHERE decision_status = 'APPROVED') as approved,
+                COUNT(*) FILTER (WHERE remediation_status = 'REMEDIATED') as remediated,
+                COUNT(*) FILTER (WHERE remediation_status = 'FAILED') as failed
+              FROM vulnerability_records
+            ) t" > audit_logs/metrics_$(date +%Y%m%d_%H%M%S).json
+
+      - name: Upload Audit Logs
         uses: actions/upload-artifact@v4
         with:
-          name: ai-virtual-patch-results
+          name: audit-logs
+          path: audit_logs/
+          retention-days: 90  # Mantém por 90 dias no GitHub
+
+      - name: Upload Remediated Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: remediated-dependencies
           path: |
-            virtual_patch_*
-            patch_meta.json
+            composer.json
+            composer.lock
+            package.json
+            package-lock.json
+            requirements.txt
 
   # STAGE 3: Validação genérica da proteção e abertura do Pull Request para Homolog
   security-validation:
@@ -90,14 +163,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: homolog
+          ref: develop
 
-      - name: Download Remediated Artifacts
+      - name: Download Remediated Files
         uses: actions/download-artifact@v4
         with:
-          name: ai-virtual-patch-results
+          name: remediated-dependencies
 
-      - name: 🔍 Re-scan do patch gerado pela IA
+      - name: 🔍 Re-scan pós-remediação
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
@@ -105,26 +178,34 @@ jobs:
           format: 'table'
           severity: 'CRITICAL,HIGH'
 
-      # 🛡️ EXPURGO CRÍTICO: Remove o banco de dados gigante de 1GB do Trivy antes que a action do PR tente rastrear alterações
-      - name: 🧹 Evitar Vazamento de Cache (Clean Trivy Assets)
+      - name: 🧹 Limpar cache do Trivy
         run: |
-          echo "Limpando artefatos pesados e arquivos de ambiente do Trivy..."
-          rm -rf .cache/
-          rm -rf trivy_envs.txt
-          echo "Diretório limpo com sucesso!"
+          rm -rf .cache/ trivy_envs.txt
 
       - name: 🚀 Create Pull Request to Homolog
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: fix/ai-autonomous-patch
+          branch: fix/auto-remediation
           base: homolog
-          title: "🤖 [AI Virtual Patching] Proteção autônoma agnóstica para código legado"
+          title: "🔒 [Auto-Remediation] Correção automática de vulnerabilidades"
           body: |
-            ## 🛡️ Remediação Autônoma Baseada em IA - Virtual Patching Escalável
-            Este Pull Request foi gerado automaticamente pelo **Framework Inteligente de Correção**.
+            ## 🔒 Remediação Automática de Vulnerabilidades SCA
+            
+            Este Pull Request foi gerado automaticamente pelo **Framework de Remediação**.
 
-            ### 📊 Comportamento do Agente:
-            - **Análise Dinâmica:** O agente de IA leu o relatório do Trivy, identificou o ecossistema tecnológico do repositório em repouso e projetou uma camada externa isolada de Virtual Patching dedicada a esta tecnologia.
-            - **Resiliência:** Nenhuma biblioteca legada foi modificada, eliminando o risco de quebra de compatibilidade em produção.
-          commit-message: "fix: injeta camada autônoma de virtual patching gerada por IA"
+            ### 📊 O que foi feito:
+            - ✅ Trivy detectou vulnerabilidades
+            - ✅ Framework consultou banco curado + OSV API para versões homologadas
+            - ✅ Decisão automática baseada em severidade (HIGH/CRITICAL)
+            - ✅ Dependências atualizadas para versões de menor impacto
+            - ✅ Re-scan validou correção
+
+            ### 📝 Próximos passos:
+            1. Revisar mudanças no `composer.json`/`package.json`
+            2. Executar testes da aplicação localmente
+            3. Aprovar e mergear se tudo estiver OK
+            
+            ### 🔍 Auditoria:
+            Todas as decisões foram registradas no banco PostgreSQL e exportadas como artifacts.
+          commit-message: "fix: corrige vulnerabilidades via remediação automática"

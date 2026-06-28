@@ -1,11 +1,11 @@
 import json
 import os
-
+from dotenv import load_dotenv
 from openai import OpenAI
 
+load_dotenv()
 
 print("Starting AI Analyzer...")
-
 
 # ==========================================
 # LOAD OPENROUTER CLIENT
@@ -16,9 +16,7 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 
-
 print("OpenRouter initialized")
-
 
 # ==========================================
 # SAMPLE CONTEXT
@@ -36,7 +34,6 @@ context = {
     ],
     "severity": "HIGH"
 }
-
 
 # ==========================================
 # PROMPT
@@ -58,9 +55,7 @@ Your task:
 - estimate remediation risk
 - explain reasoning
 
-Respond ONLY in valid JSON.
-
-Expected format:
+Respond ONLY in valid JSON:
 
 {{
   "recommended_strategy": "...",
@@ -71,16 +66,13 @@ Expected format:
 }}
 """
 
-
 print("Sending request to OpenRouter...")
-
 
 # ==========================================
 # INVOKE MODEL
 # ==========================================
 
 try:
-
     response = client.chat.completions.create(
         model="google/gemini-2.5-flash",
         max_tokens=500,
@@ -93,12 +85,22 @@ try:
         ]
     )
 
-    print()
-    print("===== AI RESPONSE =====")
-    print(response.choices[0].message.content)
+    print("\n===== AI RESPONSE =====")
+
+    content = response.choices[0].message.content
+
+    if not content:
+        raise Exception("Empty response from model")
+
+    # valida JSON
+    parsed = json.loads(content)
+
+    print(json.dumps(parsed, indent=2))
+
+except json.JSONDecodeError:
+    print("\n===== INVALID JSON RESPONSE =====")
+    print(content)
 
 except Exception as e:
-
-    print()
-    print("===== AI ERROR =====")
+    print("\n===== AI ERROR =====")
     print(e)

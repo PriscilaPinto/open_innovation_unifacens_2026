@@ -1,87 +1,98 @@
-import json
+"""
+Framework de Remediação Automática de Vulnerabilidades
+Orquestra todo o fluxo: persist → decision → remediation
+"""
 import os
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI
+import subprocess
+import sys
+from dotenv import load_dotenv
 
-def executar_virtual_patching_escalavel():
-    print("\n🤖 [FASE 1] Iniciando Framework de Virtual Patching Agnóstico e Escalável...")
+# Carrega variáveis de ambiente
+load_dotenv()
 
-    report_path = 'reports/report.json'
-
-    if not os.path.exists(report_path):
-        print("❌ Erro: Relatório 'reports/report.json' não encontrado.")
-        return
-
-    with open(report_path, 'r', encoding='utf-8') as f:
-        trivy_data = json.load(f)
-
-    vulnerabilities = []
-    ecossistema = "Desconhecido"
-    arquivo_alvo_sugerido = "patch_seguranca"
-
-    # Identifica dinamicamente o ecossistema com base no relatório do Trivy
-    for result in trivy_data.get('Results', []):
-        target_type = result.get('Type', '').lower()
-        if 'Vulnerabilities' in result:
-            vulnerabilities.extend(result['Vulnerabilities'])
-            
-        if 'composer' in target_type:
-            ecossistema = "PHP (Composer)"
-            arquivo_alvo_sugerido = "virtual_patch_bootstrap.php"
-        elif 'npm' in target_type or 'yarn' in target_type:
-            ecossistema = "Node.js (NPM)"
-            arquivo_alvo_sugerido = "virtual_patch_middleware.js"
-        elif 'pip' in target_type or 'poetry' in target_type:
-            ecossistema = "Python (PIP)"
-            arquivo_alvo_sugerido = "virtual_patch_interceptor.py"
-
-    if not vulnerabilities:
-        print("✅ Nenhuma vulnerabilidade detectada no repositório legado.")
-        return
-
-    print(f"📦 Ecossistema Detectado Automaticamente: {ecossistema}")
-    print(f"🔍 Mapeadas {len(vulnerabilities)} vulnerabilidades para mitigação.")
-
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
-
-    prompt_template = PromptTemplate.from_template(
-        """
-        Você é um agente de IA sênior especialista em AppSec, DevSecOps e Arquitetura de Software.
-        Sua missão é criar um arquivo de VIRTUAL PATCHING autônomo para mitigar as vulnerabilidades encontradas no ecossistema informado.
-
-        [DIRETRIZES DE ARQUITETURA]
-        1. Você deve gerar um arquivo isolado de proteção (um patch/interceptador/middleware) específico para o ecossistema: {ecossistema}.
-        2. Esse arquivo deve conter regras de segurança (como sanitização de inputs, validação de cabeçalhos ou bloqueio de payloads maliciosos) projetadas especificamente para neutralizar as CVEs listadas.
-        3. O objetivo é que este arquivo seja incluído no ponto de entrada do sistema legado para agir como um escudo, sem alterar as bibliotecas originais.
-        4. FORMATO DE SAÍDA: Retorne APENAS o código puríssimo do arquivo protetivo, pronto para ser salvo. Não use marcações de markdown (como ```php ou ```javascript) e não escreva explicações textuais.
-
-        [RELATÓRIO DE VULNERABILIDADES DO TRIVY]
-        {vulns}
-        """
+def executar_pipeline_completo():
+    """
+    Executa o pipeline completo de remediação:
+    1. Persiste vulnerabilidades do Trivy no banco
+    2. Executa engine de decisão (aprova HIGH/CRITICAL automaticamente)
+    3. Aplica remediações aprovadas
+    """
+    
+    print("\n" + "="*60)
+    print("🔒 FRAMEWORK DE REMEDIAÇÃO AUTOMÁTICA")
+    print("="*60 + "\n")
+    
+    # Verifica se relatório Trivy existe
+    if not os.path.exists('reports/report.json'):
+        print("❌ Erro: reports/report.json não encontrado.")
+        print("   Execute: trivy fs . --format json --output reports/report.json")
+        sys.exit(1)
+    
+    # Decide qual script de persistência usar
+    use_curated_db = os.getenv('USE_CURATED_DB', 'false').lower() == 'true'
+    persist_script = "scripts/persist_history_with_curated_db.py" if use_curated_db else "scripts/persist_history.py"
+    
+    if use_curated_db:
+        print("🗄️  Modo: Banco curado + OSV API (fallback)")
+    else:
+        print("🌐 Modo: OSV API")
+    
+    # STAGE 1: Persistir vulnerabilidades no banco
+    print("\n📊 [STAGE 1] Persistindo vulnerabilidades no banco de dados...")
+    print("-" * 60)
+    result = subprocess.run(
+        [sys.executable, persist_script],
+        capture_output=True,
+        text=True
     )
+    
+    if result.returncode != 0:
+        print(f"❌ Erro ao persistir vulnerabilidades:")
+        print(result.stderr)
+        sys.exit(1)
+    
+    print(result.stdout)
+    
+    # STAGE 2: Engine de decisão
+    print("\n🤖 [STAGE 2] Executando engine de decisão automática...")
+    print("-" * 60)
+    result = subprocess.run(
+        [sys.executable, "scripts/decision_engine.py"],
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode != 0:
+        print(f"❌ Erro no engine de decisão:")
+        print(result.stderr)
+        sys.exit(1)
+    
+    print(result.stdout)
+    
+    # STAGE 3: Aplicar remediações
+    print("\n🔧 [STAGE 3] Aplicando remediações aprovadas...")
+    print("-" * 60)
+    result = subprocess.run(
+        [sys.executable, "scripts/remediate_2.py"],
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode != 0:
+        print(f"❌ Erro ao aplicar remediações:")
+        print(result.stderr)
+        sys.exit(1)
+    
+    print(result.stdout)
+    
+    print("\n" + "="*60)
+    print("✅ PIPELINE DE REMEDIAÇÃO CONCLUÍDO COM SUCESSO")
+    print("="*60 + "\n")
+    print("📝 Próximos passos:")
+    print("   1. Verifique as mudanças no composer.json/package.json")
+    print("   2. Execute testes da aplicação")
+    print("   3. Commit e push para abrir PR automático")
 
-    chain = prompt_template | llm | StrOutputParser()
-
-    print(f"🧠 [FASE 2] IA calculando e projetando o Virtual Patch para {ecossistema}...")
-    codigo_patch = chain.invoke({
-        "ecossistema": ecossistema,
-        "vulns": json.dumps(vulnerabilities, indent=2)
-    })
-
-    # Sanitize para garantir que nenhuma tag de markdown quebre o arquivo gerado
-    codigo_limpo = codigo_patch.replace("```php", "").replace("```javascript", "").replace("```python", "").replace("```", "").strip()
-
-    # Salva o arquivo dinamicamente com o nome e extensão corretos da tecnologia detectada
-    print(f"💾 [FASE 3] Gravando o escudo protetivo autônomo: {arquivo_alvo_sugerido}")
-    with open(arquivo_alvo_sugerido, 'w', encoding='utf-8') as f:
-        f.write(codigo_limpo)
-        
-    # Salva um arquivo de metadados para o pipeline do GitHub Actions saber o que foi gerado
-    with open('patch_meta.json', 'w', encoding='utf-8') as f:
-        json.dump({"arquivo_gerado": arquivo_alvo_sugerido, "ecossistema": ecossistema}, f)
-
-    print(f"✅ [FASE 4] Virtual Patching concluído com sucesso para a tecnologia {ecossistema}!")
 
 if __name__ == "__main__":
-    executar_virtual_patching_escalavel()
+    executar_pipeline_completo()

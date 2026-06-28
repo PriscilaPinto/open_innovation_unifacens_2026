@@ -1,126 +1,89 @@
 import psycopg2
 import subprocess
 import shutil
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 try:
-
     conn = psycopg2.connect(
-        host='localhost',
-        port=5432,
-        database='remediation',
-        user='postgres',
-        password='postgres'
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", 5432)),
+        database=os.getenv("DB_NAME", "remediation"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", "postgres")
     )
 
     cursor = conn.cursor()
-
-    # ==========================================
-    # CHECK COMPOSER PATH
-    # ==========================================
 
     composer_path = shutil.which("composer")
 
     if composer_path is None:
         raise Exception("Composer não encontrado no PATH do sistema")
 
-    # ==========================================
-    # GET APPROVED REMEDIATIONS
-    # ==========================================
-
-    cursor.execute(
-        '''
-        SELECT
-            id,
-            package_name,
-            recommended_version
+    cursor.execute("""
+        SELECT id, package_name, recommended_version
         FROM vulnerability_records
         WHERE decision_status = 'APPROVED'
         AND remediation_status = 'OPEN'
-        '''
-    )
+    """)
 
     vulnerabilities = cursor.fetchall()
 
     remediated = 0
     failed = 0
 
-    # ==========================================
-    # REMEDIATION LOOP
-    # ==========================================
-
     for vuln in vulnerabilities:
 
-        vulnerability_id = vuln[0]
-        package_name = vuln[1]
-        recommended_version = vuln[2]
+        vulnerability_id, package_name, recommended_version = vuln
 
-        print(f'Remediating {package_name} -> {recommended_version}')
-
-        # ==========================================
-        # COMPOSER REQUIRE (FIXED)
-        # ==========================================
+        print(f"Remediating {package_name} -> {recommended_version}")
 
         command = [
             composer_path,
-            'require',
-            f'{package_name}:{recommended_version}'
+            "require",
+            f"{package_name}:{recommended_version}"
         ]
 
         result = subprocess.run(
             command,
             capture_output=True,
-            text=True,
-            shell=True
+            text=True
         )
-
-        # ==========================================
-        # SUCCESS
-        # ==========================================
 
         if result.returncode == 0:
 
-            print('Remediation successful')
+            print("Remediation successful")
 
-            cursor.execute(
-                '''
+            cursor.execute("""
                 UPDATE vulnerability_records
                 SET remediation_status = 'REMEDIATED'
                 WHERE id = %s
-                ''',
-                (vulnerability_id,)
-            )
+            """, (vulnerability_id,))
 
             remediated += 1
 
-        # ==========================================
-        # FAILED
-        # ==========================================
-
         else:
 
-            print('Remediation failed')
+            print("Remediation failed")
             print(result.stderr)
 
-            cursor.execute(
-                '''
+            cursor.execute("""
                 UPDATE vulnerability_records
                 SET remediation_status = 'FAILED'
                 WHERE id = %s
-                ''',
-                (vulnerability_id,)
-            )
+            """, (vulnerability_id,))
 
             failed += 1
 
     conn.commit()
 
-    print(f'Remediated: {remediated}')
-    print(f'Failed: {failed}')
+    print(f"Remediated: {remediated}")
+    print(f"Failed: {failed}")
 
     cursor.close()
     conn.close()
 
 except Exception as e:
-
-    print(f'Error: {e}')
+    print(f"Error: {e}")
