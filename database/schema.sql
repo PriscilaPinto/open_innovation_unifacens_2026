@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE TABLE pipeline_executions (
+CREATE TABLE IF NOT EXISTS pipeline_executions (
 
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
@@ -21,7 +21,7 @@ CREATE TABLE pipeline_executions (
     reduction_percentage NUMERIC(5,2)
 );
 
-CREATE TABLE vulnerability_records (
+CREATE TABLE IF NOT EXISTS vulnerability_records (
 
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
@@ -52,7 +52,7 @@ CREATE TABLE vulnerability_records (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE TABLE pull_requests (
+CREATE TABLE IF NOT EXISTS pull_requests (
 
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
@@ -74,7 +74,7 @@ CREATE TABLE pull_requests (
 -- que já foram testadas em produção
 -- ==========================================
 
-CREATE TABLE homologated_versions (
+CREATE TABLE IF NOT EXISTS homologated_versions (
 
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
@@ -93,8 +93,14 @@ CREATE TABLE homologated_versions (
     UNIQUE(package_name, ecosystem, safe_version)
 );
 
--- Exemplo de dados pré-populados
-INSERT INTO homologated_versions (package_name, ecosystem, safe_version, approved_by, notes) VALUES
-('guzzlehttp/guzzle', 'PHP', '6.5.8', 'Security Team', 'Testado em produção, sem breaking changes'),
-('guzzlehttp/guzzle', 'PHP', '7.4.5', 'Security Team', 'Versão mais recente, requer PHP 7.2+'),
-('monolog/monolog', 'PHP', '2.9.2', 'Security Team', 'Última versão estável');
+CREATE INDEX IF NOT EXISTS idx_vulnerability_records_execution_id
+    ON vulnerability_records(execution_id);
+
+CREATE INDEX IF NOT EXISTS idx_vulnerability_records_status
+    ON vulnerability_records(decision_status, remediation_status);
+
+CREATE INDEX IF NOT EXISTS idx_vulnerability_records_package_open
+    ON vulnerability_records(package_name, remediation_status);
+
+-- Exemplo de dados pré-populados (use seed_homologated_versions.sql para carga completa)
+-- INSERT INTO homologated_versions ... (ver database/seed_homologated_versions.sql)

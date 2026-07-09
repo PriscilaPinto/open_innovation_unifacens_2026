@@ -48,25 +48,7 @@ jobs:
     name: 🤖 Processamento e Decisão de Remediação
     needs: security-scan
     runs-on: ubuntu-latest
-    
-    # ==========================================
-    # POSTGRESQL SERVICE CONTAINER
-    # ==========================================
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: remediation
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -87,46 +69,57 @@ jobs:
       - name: Install Python Dependencies
         run: pip install -r requirements.txt
 
+      - name: Install PostgreSQL Client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Validate Cloud Database Secret
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          test -n "$DATABASE_URL" || (echo "Configure o secret DATABASE_URL com a connection string do PostgreSQL em nuvem." && exit 1)
+
       - name: Setup Database Schema
         env:
-          PGPASSWORD: postgres
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PGSSLMODE: require
         run: |
-          psql -h localhost -U postgres -d remediation -f database/schema.sql
+          psql "$DATABASE_URL" -f database/schema.sql
 
       - name: Seed Homologated Versions (Curated Database)
         env:
-          PGPASSWORD: postgres
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PGSSLMODE: require
         run: |
-          psql -h localhost -U postgres -d remediation -f database/seed_homologated_versions.sql
+          psql "$DATABASE_URL" -f database/seed_homologated_versions.sql
 
       - name: Run Remediation Framework
         env:
-          DB_HOST: localhost
-          DB_PORT: 5432
-          DB_NAME: remediation
-          DB_USER: postgres
-          DB_PASSWORD: postgres
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_SSLMODE: require
           USE_CURATED_DB: "true"
         run: python framework.py
 
       - name: Export Audit Data (for persistence)
         env:
-          PGPASSWORD: postgres
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PGSSLMODE: require
         run: |
           mkdir -p audit_logs
           
           # Exportar execuções do pipeline
-          psql -h localhost -U postgres -d remediation -c \
+          psql "$DATABASE_URL" -c \
             "COPY (SELECT * FROM pipeline_executions) TO STDOUT WITH CSV HEADER" \
             > audit_logs/pipeline_executions_$(date +%Y%m%d_%H%M%S).csv
           
           # Exportar vulnerabilidades
-          psql -h localhost -U postgres -d remediation -c \
+          psql "$DATABASE_URL" -c \
             "COPY (SELECT * FROM vulnerability_records) TO STDOUT WITH CSV HEADER" \
             > audit_logs/vulnerability_records_$(date +%Y%m%d_%H%M%S).csv
           
           # Exportar métricas (resumo JSON)
-          psql -h localhost -U postgres -d remediation -t -c \
+          psql "$DATABASE_URL" -t -c \
             "SELECT json_agg(row_to_json(t)) FROM (
               SELECT 
                 COUNT(*) as total_vulnerabilities,

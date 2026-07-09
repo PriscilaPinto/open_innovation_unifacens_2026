@@ -42,6 +42,7 @@ INSERT INTO homologated_versions (package_name, ecosystem, safe_version, approve
 ('requests', 'Python', '2.31.0', 'Security Team', 'Versão mais recente. Corrige vulnerabilidades SSL'),
 ('sqlalchemy', 'Python', '2.0.28', 'Security Team', 'SQLAlchemy 2.x estável'),
 ('jinja2', 'Python', '3.1.3', 'Security Team', 'Última versão. Corrige sandbox escape')
+ON CONFLICT (package_name, ecosystem, safe_version) DO NOTHING;
 
 -- ==========================================
 -- REGRAS DE PRIORIZAÇÃO

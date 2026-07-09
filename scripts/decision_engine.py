@@ -1,6 +1,6 @@
-import psycopg2
-import os
 from dotenv import load_dotenv
+
+from db import connect_db
 
 # Carrega variáveis de ambiente
 load_dotenv()
@@ -8,13 +8,7 @@ load_dotenv()
 
 try:
 
-    conn = psycopg2.connect(
-        host=os.getenv('DB_HOST', 'localhost'),
-        port=int(os.getenv('DB_PORT', 5432)),
-        database=os.getenv('DB_NAME', 'remediation'),
-        user=os.getenv('DB_USER', 'postgres'),
-        password=os.getenv('DB_PASSWORD', 'postgres')
-    )
+    conn = connect_db()
 
     cursor = conn.cursor()
 
@@ -22,16 +16,26 @@ try:
     # GET OPEN VULNERABILITIES
     # ==========================================
 
+    # Agrupa por pacote para evitar remediação duplicada
     cursor.execute(
         '''
-        SELECT
+        SELECT DISTINCT ON (package_name)
             id,
             severity,
-            recommended_version
+            recommended_version,
+            package_name
 
         FROM vulnerability_records
 
         WHERE remediation_status = 'OPEN'
+
+        ORDER BY package_name, 
+            CASE severity
+                WHEN 'CRITICAL' THEN 1
+                WHEN 'HIGH' THEN 2
+                WHEN 'MEDIUM' THEN 3
+                ELSE 4
+            END
         '''
     )
 
@@ -50,6 +54,7 @@ try:
         vulnerability_id = vuln[0]
         severity = vuln[1]
         recommended_version = vuln[2]
+        package_name = vuln[3]
 
         decision = 'MANUAL_REVIEW'
 
@@ -77,22 +82,15 @@ try:
 
             manual_review += 1
 
-        # ==========================================
-        # UPDATE DECISION
-        # ==========================================
-
+        # Atualiza todas as CVEs do mesmo pacote com a mesma decisão
         cursor.execute(
             '''
             UPDATE vulnerability_records
-
             SET decision_status = %s
-
-            WHERE id = %s
+            WHERE package_name = %s
+            AND remediation_status = 'OPEN'
             ''',
-            (
-                decision,
-                vulnerability_id
-            )
+            (decision, package_name)
         )
 
         print(f'Vulnerability decision: {decision}')

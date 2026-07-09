@@ -6,22 +6,17 @@ import os
 import sys
 import csv
 import json
-import psycopg2
 from dotenv import load_dotenv
 from pathlib import Path
+
+from db import connect_db as connect_database
 
 load_dotenv()
 
 
 def connect_db():
-    """Conecta ao banco PostgreSQL local"""
-    return psycopg2.connect(
-        host=os.getenv('DB_HOST', 'localhost'),
-        port=int(os.getenv('DB_PORT', 5432)),
-        database=os.getenv('DB_NAME', 'remediation'),
-        user=os.getenv('DB_USER', 'postgres'),
-        password=os.getenv('DB_PASSWORD', 'postgres')
-    )
+    """Conecta ao banco PostgreSQL configurado no ambiente."""
+    return connect_database()
 
 
 def import_pipeline_executions(conn, csv_path):

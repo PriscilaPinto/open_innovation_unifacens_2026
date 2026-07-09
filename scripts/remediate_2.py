@@ -1,10 +1,10 @@
-import psycopg2
 import subprocess
 import shutil
 import os
 from dotenv import load_dotenv
 
 from context_collector import detect_ecosystem
+from db import connect_db
 
 # Carrega variáveis de ambiente
 load_dotenv()
@@ -85,13 +85,7 @@ try:
     # DATABASE CONNECTION
     # ==========================================
 
-    conn = psycopg2.connect(
-        host=os.getenv('DB_HOST', 'localhost'),
-        port=int(os.getenv('DB_PORT', 5432)),
-        database=os.getenv('DB_NAME', 'remediation'),
-        user=os.getenv('DB_USER', 'postgres'),
-        password=os.getenv('DB_PASSWORD', 'postgres')
-    )
+    conn = connect_db()
 
     cursor = conn.cursor()
 
