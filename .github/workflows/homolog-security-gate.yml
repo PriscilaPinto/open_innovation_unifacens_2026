@@ -1,33 +1,106 @@
-name: 🛡️ Homolog Post-Merge Security Gate
+name: DevSecOps - Security Gate (Homolog)
 
 on:
   pull_request:
-    branches:
-      - homolog
-    types:
-      - closed # Só acorda quando um PR com destino à homolog for fechado
-  
+    branches: [homolog]
+    types: [closed]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  post-merge-validation:
-    name: 🔍 Scan de Validação Pós-Merge
-    # 🔒 CONDICIONAL CRUCIAL: Só roda se o PR foi aceito (MERGED). Se foi fechado/rejeitado, ignora.
-    if: github.event.pull_request.merged == true
+  # ============================================================
+  # Só executa quando o PR foi MERGEADO (não apenas fechado)
+  # ============================================================
+  reteste-pos-merge:
+    name: 🧪 Re-scan pós-merge em Homolog
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Homolog Branch
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: homolog
 
-      # Usando a Action oficial para evitar falhas de pacotes do Ubuntu no runner
-      - name: 🔍 Run Final Trivy Scan
+      - name: Re-scan com Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '1' # Mantido! Se a IA falhou e o pacote continua vulnerável, a esteira quebra aqui.
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+
+      - name: Atualizar status no Supabase (sucesso)
+        if: success()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_SSLMODE: require
+        run: |
+          pip install psycopg2-binary python-dotenv --quiet
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from db import connect_db
+          conn = connect_db()
+          cur = conn.cursor()
+          cur.execute("""
+              UPDATE pipeline_executions
+              SET status = 'SUCCESS', finished_at = NOW()
+              WHERE status = 'RUNNING'
+              ORDER BY started_at DESC
+              LIMIT 1
+          """)
+          conn.commit()
+          conn.close()
+          print("Status atualizado para SUCCESS")
+          EOF
+
+      - name: Rollback automático se re-scan falhar
+        if: failure()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_SSLMODE: require
+        run: |
+          pip install psycopg2-binary python-dotenv --quiet
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from db import connect_db
+          conn = connect_db()
+          cur = conn.cursor()
+
+          # Busca versões anteriores para rollback
+          cur.execute("""
+              SELECT package_name, previous_version
+              FROM vulnerability_records
+              WHERE remediation_status = 'REMEDIATED'
+                AND previous_version IS NOT NULL
+              ORDER BY updated_at DESC
+          """)
+          rows = cur.fetchall()
+
+          for pkg, prev_ver in rows:
+              print(f"⏪ Rollback: {pkg} → {prev_ver}")
+
+          # Marca execução como FAILED
+          cur.execute("""
+              UPDATE pipeline_executions
+              SET status = 'FAILED', finished_at = NOW()
+              WHERE status = 'RUNNING'
+              ORDER BY started_at DESC
+              LIMIT 1
+          """)
+
+          # Marca vulnerabilidades como ROLLED_BACK
+          cur.execute("""
+              UPDATE vulnerability_records
+              SET remediation_status = 'ROLLED_BACK', updated_at = NOW()
+              WHERE remediation_status = 'REMEDIATED'
+          """)
+
+          conn.commit()
+          conn.close()
+          print("Rollback registrado no banco. Revise manualmente o composer.json.")
+          EOF
+          exit 1

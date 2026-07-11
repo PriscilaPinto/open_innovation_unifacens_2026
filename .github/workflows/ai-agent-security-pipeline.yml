@@ -1,10 +1,8 @@
-name: DevSecOps Automated Remediation Pipeline
+name: DevSecOps - Remediação Automática
 
 on:
   push:
-    branches:
-      - develop
-  pull_request:
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
@@ -12,134 +10,112 @@ permissions:
   pull-requests: write
 
 jobs:
-  # STAGE 1: Coleta estática agnóstica de vulnerabilidades
+  # ============================================================
+  # JOB 1: Scan de vulnerabilidades com Trivy
+  # ============================================================
   security-scan:
-    name: 🔍 Scan de Vulnerabilidades Multi-Linguagem
+    name: 🔍 Trivy SCA Scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: develop
 
-      - name: Install Trivy
+      - name: Instalar Trivy
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          sudo apt-get install -y wget gnupg lsb-release
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
-          | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
+            | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
 
-      - name: Run Trivy scan (Varre a raiz buscando qualquer linguagem)
+      - name: Executar scan
         run: |
           mkdir -p reports
           trivy fs . --format json --output reports/report.json
 
-      - name: Upload Trivy Report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: trivy-report-json
+          name: trivy-report
           path: reports/report.json
 
-  # STAGE 2: O Agente processa vulnerabilidades e decide remediações
-  ai-remediation:
-    name: 🤖 Processamento e Decisão de Remediação
+  # ============================================================
+  # JOB 2: Processar vulnerabilidades e aplicar remediações
+  # Conecta no Supabase — histórico permanente entre execuções
+  # ============================================================
+  remediation:
+    name: 🤖 Remediação Automática
     needs: security-scan
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: develop
 
-      - name: Download Trivy Report
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: trivy-report-json
+          name: trivy-report
           path: reports/
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install Python Dependencies
+      - name: Instalar dependências Python
         run: pip install -r requirements.txt
 
-      - name: Install PostgreSQL Client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
-
-      - name: Validate Cloud Database Secret
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          test -n "$DATABASE_URL" || (echo "Configure o secret DATABASE_URL com a connection string do PostgreSQL em nuvem." && exit 1)
-
-      - name: Setup Database Schema
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          PGSSLMODE: require
-        run: |
-          psql "$DATABASE_URL" -f database/schema.sql
-
-      - name: Seed Homologated Versions (Curated Database)
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          PGSSLMODE: require
-        run: |
-          psql "$DATABASE_URL" -f database/seed_homologated_versions.sql
-
-      - name: Run Remediation Framework
+      - name: Criar tabelas se não existirem (idempotente)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DB_SSLMODE: require
-          USE_CURATED_DB: "true"
-        run: python framework.py
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, "scripts")
+          from db import connect_db
+          conn = connect_db()
+          cur = conn.cursor()
+          with open("database/schema.sql") as f:
+              cur.execute(f.read())
+          conn.commit()
+          conn.close()
+          print("Schema aplicado")
+          EOF
 
-      - name: Export Audit Data (for persistence)
+      - name: Popular banco curado (INSERT OR IGNORE)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          PGSSLMODE: require
+          DB_SSLMODE: require
         run: |
-          mkdir -p audit_logs
-          
-          # Exportar execuções do pipeline
-          psql "$DATABASE_URL" -c \
-            "COPY (SELECT * FROM pipeline_executions) TO STDOUT WITH CSV HEADER" \
-            > audit_logs/pipeline_executions_$(date +%Y%m%d_%H%M%S).csv
-          
-          # Exportar vulnerabilidades
-          psql "$DATABASE_URL" -c \
-            "COPY (SELECT * FROM vulnerability_records) TO STDOUT WITH CSV HEADER" \
-            > audit_logs/vulnerability_records_$(date +%Y%m%d_%H%M%S).csv
-          
-          # Exportar métricas (resumo JSON)
-          psql "$DATABASE_URL" -t -c \
-            "SELECT json_agg(row_to_json(t)) FROM (
-              SELECT 
-                COUNT(*) as total_vulnerabilities,
-                COUNT(*) FILTER (WHERE decision_status = 'APPROVED') as approved,
-                COUNT(*) FILTER (WHERE remediation_status = 'REMEDIATED') as remediated,
-                COUNT(*) FILTER (WHERE remediation_status = 'FAILED') as failed
-              FROM vulnerability_records
-            ) t" > audit_logs/metrics_$(date +%Y%m%d_%H%M%S).json
+          python - <<'EOF'
+          import sys
+          sys.path.insert(0, "scripts")
+          from db import connect_db
+          conn = connect_db()
+          cur = conn.cursor()
+          try:
+              with open("database/seed_homologated_versions.sql") as f:
+                  cur.execute(f.read())
+              conn.commit()
+              print("Seed aplicado")
+          except Exception as e:
+              conn.rollback()
+              print(f"Seed: {e}")
+          conn.close()
+          EOF
 
-      - name: Upload Audit Logs
+      - name: Executar framework de remediação
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_SSLMODE: require
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: python framework.py
+
+      - name: Upload arquivos remediados
         uses: actions/upload-artifact@v4
         with:
-          name: audit-logs
-          path: audit_logs/
-          retention-days: 90  # Mantém por 90 dias no GitHub
-
-      - name: Upload Remediated Files
-        uses: actions/upload-artifact@v4
-        with:
-          name: remediated-dependencies
+          name: remediated-files
           path: |
             composer.json
             composer.lock
@@ -147,58 +123,59 @@ jobs:
             package-lock.json
             requirements.txt
 
-  # STAGE 3: Validação genérica da proteção e abertura do Pull Request para Homolog
-  security-validation:
-    name: 🧪 Validação e Abertura de PR Automatizado
-    needs: ai-remediation
+  # ============================================================
+  # JOB 3: Abrir PR automático para homolog
+  # ============================================================
+  open-pr:
+    name: 🚀 Abrir PR para Homolog
+    needs: remediation
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: develop
+          fetch-depth: 0
 
-      - name: Download Remediated Files
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: remediated-dependencies
+          name: remediated-files
 
-      - name: 🔍 Re-scan pós-remediação
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-
-      - name: 🧹 Limpar cache do Trivy
+      - name: Garantir que branch homolog existe
         run: |
-          rm -rf .cache/ trivy_envs.txt
+          git fetch origin
+          if ! git ls-remote --heads origin homolog | grep -q homolog; then
+            git checkout -b homolog
+            git push origin homolog
+            echo "Branch homolog criada"
+          else
+            echo "Branch homolog já existe"
+          fi
 
-      - name: 🚀 Create Pull Request to Homolog
+      - name: Criar Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: fix/auto-remediation
+          branch: fix/auto-remediation-${{ github.run_id }}
           base: homolog
-          title: "🔒 [Auto-Remediation] Correção automática de vulnerabilidades"
+          title: "🔒 [Auto-Remediation] Correção automática de vulnerabilidades #${{ github.run_id }}"
           body: |
             ## 🔒 Remediação Automática de Vulnerabilidades SCA
-            
-            Este Pull Request foi gerado automaticamente pelo **Framework de Remediação**.
 
-            ### 📊 O que foi feito:
+            Pipeline: `${{ github.run_id }}` | Branch origem: `develop`
+
+            ### O que foi feito:
             - ✅ Trivy detectou vulnerabilidades
-            - ✅ Framework consultou banco curado + OSV API para versões homologadas
-            - ✅ Decisão automática baseada em severidade (HIGH/CRITICAL)
-            - ✅ Dependências atualizadas para versões de menor impacto
-            - ✅ Re-scan validou correção
+            - ✅ Banco curado + OSV API consultados para versões seguras
+            - ✅ Decisão automática por severidade (CRITICAL/HIGH → APPROVED)
+            - ✅ Dependências atualizadas com menor impacto (same-major)
+            - ✅ Histórico de auditoria salvo no Supabase
 
-            ### 📝 Próximos passos:
-            1. Revisar mudanças no `composer.json`/`package.json`
-            2. Executar testes da aplicação localmente
-            3. Aprovar e mergear se tudo estiver OK
-            
-            ### 🔍 Auditoria:
-            Todas as decisões foram registradas no banco PostgreSQL e exportadas como artifacts.
-          commit-message: "fix: corrige vulnerabilidades via remediação automática"
+            ### Próximos passos:
+            1. Revisar mudanças no `composer.json` / `package.json`
+            2. Merge dispara re-scan automático no homolog
+            3. Se vulnerabilidade persistir, pipeline bloqueia
+
+            ### Auditoria:
+            Todas as decisões estão registradas no Supabase com `execution_id` e timestamp.
+          commit-message: "fix: atualiza dependências vulneráveis via remediação automática"
+          delete-branch: false

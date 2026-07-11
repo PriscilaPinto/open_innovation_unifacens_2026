@@ -204,6 +204,13 @@ cython_debug/
 # .vscode/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Trivy report (gerado pelo pipeline, não versionado)
+reports/report.json
  
 # Ruff stuff:
 .ruff_cache/
