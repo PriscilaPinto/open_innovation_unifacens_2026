@@ -1,6 +1,7 @@
 """
 Framework de Remediação Automática de Vulnerabilidades
 Executa os 3 stages no mesmo processo Python — sem subprocessos.
+O agente de IA é o cérebro: analisa cada vulnerabilidade e decide a estratégia.
 """
 import os
 import sys
@@ -13,11 +14,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Garante que scripts/ está no path para importar db.py e context_collector.py
+# Garante que scripts/ está no path para importar db.py, context_collector.py e ai_agent.py
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
 
 from db import connect_db
 from context_collector import detect_ecosystem
+from ai_agent import analisar_lote
 
 
 # ============================================================
@@ -129,44 +131,86 @@ def stage1_persist(conn):
 
 
 # ============================================================
-# STAGE 2: Engine de Decisão
+# STAGE 2: Engine de Decisão com Agente de IA
 # ============================================================
 def stage2_decide(conn):
-    print("\n🤖 STAGE 2 - Engine de Decisão")
+    print("\n🤖 STAGE 2 - Agente de IA: Análise e Decisão")
     print("-" * 60)
 
     cursor = conn.cursor()
+
+    # Busca vulnerabilidades OPEN com PENDING para análise
     cursor.execute("""
-        SELECT DISTINCT ON (package_name)
-            id, package_name, severity, recommended_version
+        SELECT id, package_name, severity, recommended_version,
+               installed_version, cve_id, fixed_version
         FROM vulnerability_records
         WHERE remediation_status = 'OPEN'
           AND decision_status = 'PENDING'
-        ORDER BY package_name,
+        ORDER BY
             CASE severity
                 WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
                 WHEN 'MEDIUM'   THEN 3 WHEN 'LOW'  THEN 4 ELSE 5
             END
     """)
-    packages = cursor.fetchall()
+    rows = cursor.fetchall()
+
+    if not rows:
+        print("  Nenhuma vulnerabilidade pendente de análise.")
+        cursor.close()
+        return
+
+    # Prepara lista para o agente de IA
+    vulns_para_ia = [
+        {
+            "id": r[0],
+            "package_name": r[1],
+            "severity": r[2],
+            "recommended_version": r[3],
+            "installed_version": r[4],
+            "cve_id": r[5],
+            "fixed_version": r[6],
+            "ecosystem": "PHP"  # context_collector detecta, mas aqui já sabemos
+        }
+        for r in rows
+    ]
+
+    # Agente de IA analisa cada pacote único
+    print(f"  Analisando {len(set(v['package_name'] for v in vulns_para_ia))} pacote(s) únicos...\n")
+    decisoes = analisar_lote(vulns_para_ia)
+
+    # Mapa: package_name → decisão da IA
+    decisao_por_pacote = {d["package_name"]: d for d in decisoes}
 
     approved = manual = ignored = 0
-    for _, pkg, severity, recommended_version in packages:
-        if severity in ("CRITICAL", "HIGH") and recommended_version:
-            decision = "APPROVED";  approved += 1
-        elif severity == "LOW":
-            decision = "IGNORE";    ignored  += 1
-        else:
-            decision = "MANUAL_REVIEW"; manual += 1
+    for vuln in vulns_para_ia:
+        pkg = vuln["package_name"]
+        d = decisao_por_pacote.get(pkg)
 
+        if not d:
+            decision = "MANUAL_REVIEW"
+            justification = "Pacote não analisado pela IA."
+            recommended = vuln["recommended_version"]
+            manual += 1
+        else:
+            decision = d["decision"]
+            justification = d["justification"]
+            recommended = d["recommended_version"] or vuln["recommended_version"]
+            if decision == "APPROVED":
+                approved += 1
+            elif decision == "IGNORE":
+                ignored += 1
+            else:
+                manual += 1
+
+        # Atualiza decisão, justificativa e versão recomendada pela IA
         cursor.execute("""
             UPDATE vulnerability_records
-            SET decision_status = %s
-            WHERE package_name = %s
-              AND remediation_status = 'OPEN'
-              AND decision_status = 'PENDING'
-        """, (decision, pkg))
-        print(f"  {pkg}: {decision} (severity: {severity})")
+            SET decision_status   = %s,
+                ai_justification  = %s,
+                recommended_version = COALESCE(%s, recommended_version),
+                updated_at        = NOW()
+            WHERE id = %s
+        """, (decision, justification, recommended, vuln["id"]))
 
     conn.commit()
     print(f"\nApproved: {approved} | Manual Review: {manual} | Ignored: {ignored}")
