@@ -100,6 +100,14 @@ jobs:
               cur.execute(f.read())
           conn.commit()
 
+          # Remove entradas erradas do psr7 e força re-seed
+          cur.execute("""
+              DELETE FROM homologated_versions
+              WHERE package_name = 'guzzlehttp/psr7'
+                AND safe_version = '1.9.1'
+          """)
+          conn.commit()
+
           try:
               with open("database/seed_homologated_versions.sql") as f:
                   cur.execute(f.read())
@@ -177,12 +185,23 @@ jobs:
           # Cria ou reseta fix-remediation a partir do HEAD atual de develop
           git checkout -B fix-remediation
 
-          git add composer.json composer.lock package.json package-lock.json requirements.txt 2>/dev/null || true
+          # Força git a ver as mudanças do sistema de arquivos (composer require modifica esses arquivos)
+          git update-index --refresh 2>/dev/null || true
 
+          # Adiciona todos os arquivos de dependências modificados
+          for f in composer.json composer.lock package.json package-lock.json requirements.txt; do
+            if [ -f "$f" ]; then
+              git add -f "$f"
+              echo "Adicionado: $f"
+            fi
+          done
+
+          # Verifica se há mudanças staged
           if git diff --cached --quiet; then
             echo "HAS_CHANGES=false" >> $GITHUB_ENV
             echo "Nenhuma alteração detectada — sem vulnerabilidades para corrigir."
           else
+            git status --short
             git commit -m "fix: remediação automática via agente de IA (run #${{ github.run_id }})"
             git push origin fix-remediation --force
             echo "HAS_CHANGES=true" >> $GITHUB_ENV
