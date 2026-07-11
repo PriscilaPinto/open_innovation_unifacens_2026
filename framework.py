@@ -19,11 +19,28 @@ STAGES = [
 def run_stage(label, script):
     print(f"\n{label}")
     print("-" * 60)
-    result = subprocess.run([sys.executable, script], capture_output=True, text=True)
-    print(result.stdout)
-    if result.returncode != 0:
-        print(f"❌ Erro em {script}:")
+
+    # Adiciona scripts/ ao PYTHONPATH para que 'from db import connect_db' funcione
+    env = os.environ.copy()
+    scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+    existing_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{scripts_dir}{os.pathsep}{existing_path}" if existing_path else scripts_dir
+
+    result = subprocess.run(
+        [sys.executable, script],
+        capture_output=True,
+        text=True,
+        env=env
+    )
+
+    # Sempre imprime stdout e stderr para visibilidade nos logs do Actions
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
         print(result.stderr)
+
+    if result.returncode != 0:
+        print(f"❌ Erro em {script} (exit code {result.returncode})")
         sys.exit(1)
 
 
