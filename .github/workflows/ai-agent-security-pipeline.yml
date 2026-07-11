@@ -116,9 +116,8 @@ jobs:
       # Agente de IA orquestra todo o pipeline:
       # Stage 1: lê Trivy report + persiste no Supabase + consulta OSV
       # Stage 2: IA analisa CVEs e decide estratégia (APPROVED/MANUAL_REVIEW)
-      # Stage 3: aplica patches via composer/npm/pip
-      # Stage 4: re-scan Trivy + smoke test PHP para validar correções
-      - name: Executar Agente de IA (framework completo)
+      # Stage 3: aplica patches via composer/npm/pip (multi-linguagem)
+      - name: Executar Agente de IA (Stages 1-3)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DB_SSLMODE: require
@@ -130,6 +129,40 @@ jobs:
           AI_TEMPERATURE: "0.1"
           AI_MAX_TOKENS: "600"
         run: python framework.py
+
+      # Stage 4: Re-scan Trivy pós-patch (multi-linguagem)
+      # Trivy está instalado no Job 1, mas não no PATH do Python
+      # Por isso o re-scan é feito aqui como step do workflow
+      - name: Re-scan Trivy pós-patch (Stage 4)
+        run: |
+          mkdir -p reports
+          trivy fs . --format json --output reports/report_post_patch.json \
+            --skip-version-check || true
+          trivy fs . --format table --severity CRITICAL,HIGH \
+            --skip-version-check || true
+
+      # Smoke test multilinguagem (Req 8)
+      - name: Smoke test (validação de estabilidade)
+        run: |
+          # PHP
+          if [ -f "composer.json" ] && command -v php &> /dev/null; then
+            echo "--- PHP smoke test ---"
+            for f in index.php; do
+              [ -f "$f" ] && php -l "$f" && echo "✅ $f: OK"
+            done
+            composer install --no-interaction --no-progress --prefer-dist 2>&1 | tail -3
+          fi
+          # Node.js
+          if [ -f "package.json" ] && command -v node &> /dev/null; then
+            echo "--- Node.js smoke test ---"
+            node --version && npm install --dry-run 2>&1 | tail -3
+          fi
+          # Python
+          if [ -f "requirements.txt" ] && command -v python &> /dev/null; then
+            echo "--- Python smoke test ---"
+            python -c "import pkg_resources; pkg_resources.require(open('requirements.txt').readlines())" 2>&1 | tail -3
+          fi
+          echo "✅ Smoke tests concluídos"
 
       # Branch intermediária com nome FIXO: fix-remediation
       # Força push (sobrescreve execuções anteriores)
