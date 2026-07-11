@@ -5,8 +5,7 @@ INSERT INTO homologated_versions (package_name, ecosystem, safe_version, approve
 -- PHP / Composer
 ('guzzlehttp/guzzle',      'PHP', '6.5.8',  'Security Team', 'Última versão 6.x. Corrige CVE-2022-29248/31042/31043/31090/31091'),
 ('guzzlehttp/guzzle',      'PHP', '7.8.1',  'Security Team', 'Última versão estável 7.x. Requer PHP 7.2.5+'),
-('guzzlehttp/psr7',        'PHP', '1.9.1',  'Security Team', 'Última versão 1.x psr7'),
-('guzzlehttp/psr7',        'PHP', '2.6.2',  'Security Team', 'Última versão 2.x psr7'),
+('guzzlehttp/psr7',        'PHP', '2.6.2',  'Security Team', 'Última versão 2.x psr7 - corrige CVEs de information disclosure'),
 ('monolog/monolog',        'PHP', '2.9.2',  'Security Team', 'Versão 2.x estável. Compatível com PHP 7.4+'),
 ('monolog/monolog',        'PHP', '3.5.0',  'Security Team', 'Versão 3.x. Requer PHP 8.1+'),
 ('symfony/http-foundation','PHP', '5.4.35', 'Security Team', 'LTS Symfony 5.4'),
