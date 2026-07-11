@@ -1,37 +1,28 @@
 name: DevSecOps - Security Gate (Homolog)
 
-# Dispara SOMENTE quando um PR com destino homolog for mergeado
-# A pipeline 1 (ai-agent-security-pipeline) NÃO é re-executada
+# Dispara quando homolog recebe push (merge automático da pipeline 1)
+# A pipeline 1 NÃO é re-executada — este workflow é independente
 on:
-  pull_request:
+  push:
     branches: [homolog]
-    types: [closed]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  # ============================================================
-  # Executa apenas quando o PR foi MERGEADO em homolog
-  # Valida que as correções eliminaram as vulnerabilidades
-  # e que a aplicação não quebrou
-  # ============================================================
   security-gate:
     name: 🧪 Re-scan e Validação em Homolog
-    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: homolog
 
-      # ----------------------------------------------------------
       # Re-scan com o código já corrigido em homolog
-      # Se ainda houver CVE CRITICAL/HIGH → exit-code 1 → falha
-      # ----------------------------------------------------------
-      - name: Re-scan Trivy em homolog
-        id: trivy-scan
+      # exit-code 1 garante que o job falha se vuln persistir
+      - name: Re-scan Trivy
+        id: trivy
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
@@ -40,25 +31,21 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
 
-      # ----------------------------------------------------------
-      # Validação básica da aplicação PHP (se existir)
-      # Garante que a atualização de dependências não quebrou nada
-      # ----------------------------------------------------------
-      - name: Instalar dependências PHP (se composer.json existir)
+      # Smoke test: valida sintaxe PHP após atualização das dependências
+      - name: Instalar dependências PHP
         if: hashFiles('composer.json') != ''
         run: |
           sudo apt-get install -y php-cli --quiet
-          curl -sS https://getcomposer.org/installer | php
-          php composer.phar install --no-interaction --no-progress 2>&1 | tail -5
+          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+          composer install --no-interaction --no-progress --prefer-dist 2>&1 | tail -10
 
-      - name: Validar aplicação PHP (smoke test)
-        if: hashFiles('composer.json') != '' && hashFiles('index.php') != ''
+      - name: Smoke test PHP
+        if: hashFiles('index.php') != ''
         run: |
-          php -l index.php && echo "✅ Syntax OK" || echo "⚠️ Syntax error detectado"
+          php -l index.php
+          echo "✅ Sintaxe PHP OK"
 
-      # ----------------------------------------------------------
       # Sucesso: atualiza status no Supabase
-      # ----------------------------------------------------------
       - name: Registrar sucesso no Supabase
         if: success()
         env:
@@ -80,17 +67,13 @@ jobs:
               ORDER BY started_at DESC
               LIMIT 1
           """)
-          rows = cur.rowcount
           conn.commit()
           conn.close()
-          print(f"✅ Execução marcada como SUCCESS ({rows} registro(s) atualizado(s))")
+          print("✅ Status atualizado para SUCCESS no Supabase")
           EOF
 
-      # ----------------------------------------------------------
-      # Falha: registra ROLLED_BACK no banco para auditoria
-      # develop continua inalterado — equipe revisa manualmente
-      # ----------------------------------------------------------
-      - name: Registrar falha e rollback no Supabase
+      # Falha: registra no banco — develop continua seguro e inalterado
+      - name: Registrar falha no Supabase
         if: failure()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -105,7 +88,7 @@ jobs:
           conn = connect_db()
           cur = conn.cursor()
 
-          # Log das versões anteriores para auditoria
+          # Loga versões anteriores disponíveis para rollback manual
           cur.execute("""
               SELECT package_name, installed_version, previous_version
               FROM vulnerability_records
@@ -113,10 +96,14 @@ jobs:
                 AND previous_version IS NOT NULL
               ORDER BY updated_at DESC
           """)
-          for pkg, installed, prev in cur.fetchall():
-              print(f"⏪ {pkg}: {installed} ← rollback para {prev}")
+          rows = cur.fetchall()
+          if rows:
+              print("Versões anteriores disponíveis para rollback:")
+              for pkg, installed, prev in rows:
+                  print(f"  {pkg}: {installed} ← {prev}")
+          else:
+              print("Nenhuma versão anterior registrada.")
 
-          # Marca execução como FAILED
           cur.execute("""
               UPDATE pipeline_executions
               SET status = 'FAILED', finished_at = NOW()
@@ -124,16 +111,13 @@ jobs:
               ORDER BY started_at DESC
               LIMIT 1
           """)
-
-          # Marca vulnerabilidades como ROLLED_BACK
           cur.execute("""
               UPDATE vulnerability_records
               SET remediation_status = 'ROLLED_BACK', updated_at = NOW()
               WHERE remediation_status = 'REMEDIATED'
           """)
-
           conn.commit()
           conn.close()
-          print("❌ Rollback registrado. Revise os arquivos em homolog manualmente.")
+          print("❌ Falha registrada no Supabase. Revise homolog manualmente.")
           EOF
           exit 1

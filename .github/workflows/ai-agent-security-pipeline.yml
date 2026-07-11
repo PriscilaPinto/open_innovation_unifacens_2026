@@ -40,14 +40,16 @@ jobs:
           path: reports/report.json
 
   # ============================================================
-  # JOB 2: Aplicar remediações e commitar em branch isolada
+  # JOB 2: Aplicar remediações, commitar em branch isolada
+  #         e mergear automaticamente em homolog
   #
-  # IMPORTANTE: develop NÃO é alterado.
-  # As correções são aplicadas em fix/auto-remediation-{run_id}
-  # que é criada a partir de develop neste job.
+  # develop NÃO é alterado.
+  # Todas as correções vão para fix/auto-remediation-{run_id}
+  # que é mergeada automaticamente em homolog.
+  # A interação humana ocorre SOMENTE em homolog.
   # ============================================================
   remediation:
-    name: 🤖 Remediação e Commit na Branch de Fix
+    name: 🤖 Remediação e Merge Automático em Homolog
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
@@ -55,7 +57,6 @@ jobs:
         with:
           ref: develop
           fetch-depth: 0
-          # token com permissão de push para criar a branch de fix
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/download-artifact@v4
@@ -67,10 +68,17 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Instalar PHP e Composer
+        run: |
+          sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
+          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+          composer --version
+
       - name: Instalar dependências Python
         run: pip install -r requirements.txt --quiet
 
-      - name: Garantir schema e seed no Supabase (idempotente)
+      # Aplicar schema E migration da coluna previous_version
+      - name: Aplicar schema e migrations no Supabase
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DB_SSLMODE: require
@@ -83,11 +91,17 @@ jobs:
           conn = connect_db()
           cur = conn.cursor()
 
+          # Schema principal (CREATE TABLE IF NOT EXISTS — idempotente)
           with open("database/schema.sql") as f:
               cur.execute(f.read())
           conn.commit()
-          print("Schema aplicado")
 
+          # Migration: garante coluna previous_version
+          with open("database/migrate_add_previous_version.sql") as f:
+              cur.execute(f.read())
+          conn.commit()
+
+          # Seed do banco curado (ON CONFLICT DO NOTHING)
           try:
               with open("database/seed_homologated_versions.sql") as f:
                   cur.execute(f.read())
@@ -98,8 +112,10 @@ jobs:
               print(f"Seed já populado: {e}")
 
           conn.close()
+          print("Schema + migrations aplicados")
           EOF
 
+      # Framework aplica as correções no workspace atual (checkout de develop)
       - name: Executar framework de remediação
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -108,74 +124,99 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: python framework.py
 
-      # Criar branch isolada a partir de develop e commitar as correções
-      # develop permanece inalterado
-      - name: Criar branch de fix e commitar correções
+      # Criar branch isolada, commitar TODOS os arquivos alterados
+      # (composer.json + composer.lock + package.json + etc.)
+      # develop permanece intacto
+      - name: Criar branch de fix com as correções
+        id: create-branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BRANCH="fix/auto-remediation-${{ github.run_id }}"
+          echo "FIX_BRANCH=$BRANCH" >> $GITHUB_ENV
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Cria branch a partir do HEAD de develop (sem afetar develop)
           git checkout -b "$BRANCH"
 
-          # Adiciona apenas os arquivos de dependências que o framework pode ter alterado
-          git add composer.json composer.lock package.json package-lock.json requirements.txt 2>/dev/null || true
+          # Adiciona todos os arquivos de dependências que podem ter sido alterados
+          FILES_TO_ADD=(
+            "composer.json"
+            "composer.lock"
+            "package.json"
+            "package-lock.json"
+            "requirements.txt"
+          )
+          for f in "${FILES_TO_ADD[@]}"; do
+            [ -f "$f" ] && git add "$f"
+          done
 
-          # Só commita se houver mudanças reais
           if git diff --cached --quiet; then
-            echo "Nenhuma alteração detectada — vulnerabilidades já corrigidas ou sem versão disponível."
+            echo "Nenhuma alteração detectada."
+            echo "HAS_CHANGES=false" >> $GITHUB_ENV
           else
             git commit -m "fix: remediação automática de vulnerabilidades (run #${{ github.run_id }})"
             git push origin "$BRANCH"
-            echo "BRANCH_PUSHED=true" >> $GITHUB_ENV
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+            echo "Branch $BRANCH publicada com as correções"
           fi
 
-          echo "FIX_BRANCH=$BRANCH" >> $GITHUB_ENV
-
-      # Garantir que homolog existe antes de abrir o PR
+      # Garantir que branch homolog existe
       - name: Garantir branch homolog
+        if: env.HAS_CHANGES == 'true'
         run: |
           git fetch origin
           if ! git ls-remote --heads origin homolog | grep -q homolog; then
             git checkout -b homolog
             git push origin homolog
             echo "Branch homolog criada"
-          else
-            echo "Branch homolog já existe"
           fi
+          git checkout homolog
+          git pull origin homolog
 
-      # Abre PR somente se houve commit com correção
-      - name: Abrir PR para homolog
-        if: env.BRANCH_PUSHED == 'true'
+      # Merge automático da branch de fix em homolog
+      # Mínima interação humana: o merge ocorre automaticamente aqui.
+      # A revisão humana acontece DEPOIS, em homolog, antes de ir para main/produção.
+      - name: Merge automático em homolog
+        if: env.HAS_CHANGES == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git checkout homolog
+          git pull origin homolog
+
+          git merge --no-ff origin/${{ env.FIX_BRANCH }} \
+            -m "chore: merge automático da remediação run #${{ github.run_id }} em homolog"
+
+          git push origin homolog
+          echo "✅ Correções mergeadas em homolog automaticamente"
+
+      # Notificação: abrir PR de homolog para main para revisão humana
+      - name: Abrir PR de homolog para main (revisão humana)
+        if: env.HAS_CHANGES == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ env.FIX_BRANCH }}
-          base: homolog
-          title: "🔒 [Auto-Remediation] Correção de vulnerabilidades — run #${{ github.run_id }}"
+          branch: homolog
+          base: main
+          title: "🔒 [Homolog → Main] Validar remediação — run #${{ github.run_id }}"
           body: |
-            ## 🔒 Remediação Automática de Vulnerabilidades SCA
+            ## 🔒 Remediação Validada — Aguardando Aprovação para Main
 
-            **Pipeline:** `${{ github.run_id }}` | **Origem:** `develop` | **Destino:** `homolog`
+            **Pipeline:** `${{ github.run_id }}` | **Origem:** `develop` → `homolog`
 
-            ### O que foi feito
+            ### O que foi feito automaticamente
             - ✅ Trivy detectou vulnerabilidades em `develop`
-            - ✅ Banco curado (Supabase) + OSV API consultados para versões seguras
-            - ✅ Decisão automática por severidade (CRITICAL/HIGH → APPROVED)
-            - ✅ Dependências atualizadas com estratégia same-major (menor impacto)
-            - ✅ Correções commitadas nesta branch — `develop` **não foi alterado**
-            - ✅ Histórico de auditoria salvo no Supabase
+            - ✅ Banco curado (Supabase) + OSV API consultados
+            - ✅ Dependências atualizadas com estratégia same-major
+            - ✅ `develop` **não foi alterado** — correções em branch isolada
+            - ✅ Merge automático em `homolog` realizado
+            - ✅ Security gate irá validar em homolog automaticamente
 
-            ### Próximos passos
-            1. Revisar as mudanças nos arquivos de dependências
-            2. Mergear este PR — a segunda pipeline valida automaticamente
-            3. Se vuln persistir após merge, o security gate bloqueia e registra rollback
-
-            ### Auditoria
-            Todas as decisões estão registradas no Supabase com `execution_id` e timestamp por execução.
-          commit-message: "fix: remediação automática de vulnerabilidades"
+            ### Ação necessária
+            Aguarde o security gate passar em `homolog`.
+            Se o re-scan confirmar que as vulnerabilidades foram eliminadas,
+            aprove este PR para promover para `main`.
+          commit-message: "chore: promoção de homolog para main"
           delete-branch: false
