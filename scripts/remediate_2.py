@@ -1,215 +1,95 @@
-```python
-import psycopg2
+"""
+STAGE 3 - Aplicação de Remediações
+Executa composer/npm/pip para atualizar dependências aprovadas.
+Salva versão anterior para permitir rollback.
+"""
 import subprocess
 import shutil
-
+import os
+from dotenv import load_dotenv
+from db import connect_db
 from context_collector import detect_ecosystem
 
+load_dotenv()
 
-# ==========================================
-# DETECT ECOSYSTEM
-# ==========================================
-
-context = detect_ecosystem()
-
-package_manager = context.get("package_manager")
-
-print(f'Ecosystem detected: {context.get("ecosystem")}')
-print(f'Package manager detected: {package_manager}')
-
-
-# ==========================================
-# PACKAGE MANAGER COMMANDS
-# ==========================================
-
-manager_commands = {
-
-    "composer": {
-        "binary": "composer",
-        "command_builder": lambda pkg, ver: [
-            "composer",
-            "require",
-            f"{pkg}:{ver}"
-        ]
-    },
-
-    "npm": {
-        "binary": "npm",
-        "command_builder": lambda pkg, ver: [
-            "npm",
-            "install",
-            f"{pkg}@{ver}"
-        ]
-    },
-
-    "pip": {
-        "binary": "pip",
-        "command_builder": lambda pkg, ver: [
-            "pip",
-            "install",
-            f"{pkg}=={ver}"
-        ]
-    }
+COMMANDS = {
+    "composer": lambda pkg, ver: ["composer", "require", f"{pkg}:{ver}", "--no-interaction"],
+    "npm":      lambda pkg, ver: ["npm", "install", f"{pkg}@{ver}"],
+    "pip":      lambda pkg, ver: ["pip", "install", f"{pkg}=={ver}"],
 }
 
 
-try:
+def main():
+    context = detect_ecosystem()
+    pm = context.get("package_manager")
+    print(f"Ecosystem: {context.get('ecosystem')} | Package manager: {pm}")
 
-    # ==========================================
-    # VALIDATE PACKAGE MANAGER
-    # ==========================================
+    if pm not in COMMANDS:
+        raise SystemExit(f"❌ Package manager não suportado: {pm}")
 
-    if package_manager not in manager_commands:
+    binary = shutil.which(pm)
+    if binary is None:
+        raise SystemExit(f"❌ {pm} não encontrado no PATH")
+    print(f"{pm} encontrado: {binary}\n")
 
-        raise Exception(
-            f'Supported package manager not found: {package_manager}'
-        )
-
-    binary_name = manager_commands[package_manager]["binary"]
-
-    binary_path = shutil.which(binary_name)
-
-    if binary_path is None:
-
-        raise Exception(
-            f'{binary_name} not found in system PATH'
-        )
-
-    print(f'{binary_name} found: {binary_path}')
-
-    # ==========================================
-    # DATABASE CONNECTION
-    # ==========================================
-
-    conn = psycopg2.connect(
-        host='localhost',
-        port=5432,
-        database='remediation',
-        user='postgres',
-        password='postgres'
-    )
-
+    conn = connect_db()
     cursor = conn.cursor()
 
-    # ==========================================
-    # GET APPROVED REMEDIATIONS
-    # ==========================================
-
-    cursor.execute(
-        '''
-        SELECT
-            id,
-            package_name,
-            recommended_version
-
+    # Busca apenas um registro por pacote com APPROVED para evitar execução duplicada
+    cursor.execute("""
+        SELECT DISTINCT ON (package_name)
+            id, package_name, installed_version, recommended_version
         FROM vulnerability_records
-
         WHERE decision_status = 'APPROVED'
-        AND remediation_status = 'OPEN'
-        '''
-    )
+          AND remediation_status = 'OPEN'
+        ORDER BY package_name
+    """)
+    rows = cursor.fetchall()
 
-    vulnerabilities = cursor.fetchall()
+    if not rows:
+        print("Nenhuma vulnerabilidade aprovada para remediar.")
+        cursor.close()
+        conn.close()
+        return
 
-    remediated = 0
-    failed = 0
+    remediated = failed = 0
 
-    # ==========================================
-    # REMEDIATION LOOP
-    # ==========================================
+    for vuln_id, pkg, old_version, new_version in rows:
+        print(f"🔧 {pkg}: {old_version} → {new_version}")
+        cmd = COMMANDS[pm](pkg, new_version)
+        print(f"   Executando: {' '.join(cmd)}")
 
-    for vuln in vulnerabilities:
-
-        vulnerability_id = vuln[0]
-        package_name = vuln[1]
-        recommended_version = vuln[2]
-
-        print()
-        print(
-            f'Remediating {package_name} -> {recommended_version}'
-        )
-
-        # ==========================================
-        # BUILD DYNAMIC COMMAND
-        # ==========================================
-
-        command = manager_commands[
-            package_manager
-        ]["command_builder"](
-            package_name,
-            recommended_version
-        )
-
-        print(f'Executing: {" ".join(command)}')
-
-        # ==========================================
-        # EXECUTE REMEDIATION
-        # ==========================================
-
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            shell=True
-        )
-
-        # ==========================================
-        # SUCCESS
-        # ==========================================
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode == 0:
-
-            print('Remediation successful')
-
-            cursor.execute(
-                '''
+            print(f"   ✅ Sucesso")
+            # Marca TODAS as CVEs do pacote como REMEDIATED e salva versão anterior para rollback
+            cursor.execute("""
                 UPDATE vulnerability_records
-
-                SET remediation_status = 'REMEDIATED'
-
-                WHERE id = %s
-                ''',
-                (vulnerability_id,)
-            )
-
+                SET remediation_status = 'REMEDIATED',
+                    previous_version = installed_version,
+                    updated_at = NOW()
+                WHERE package_name = %s
+                  AND decision_status = 'APPROVED'
+                  AND remediation_status = 'OPEN'
+            """, (pkg,))
             remediated += 1
-
-        # ==========================================
-        # FAILED
-        # ==========================================
-
         else:
-
-            print('Remediation failed')
-            print(result.stderr)
-
-            cursor.execute(
-                '''
+            print(f"   ❌ Falha: {result.stderr[:200]}")
+            cursor.execute("""
                 UPDATE vulnerability_records
-
-                SET remediation_status = 'FAILED'
-
-                WHERE id = %s
-                ''',
-                (vulnerability_id,)
-            )
-
+                SET remediation_status = 'FAILED', updated_at = NOW()
+                WHERE package_name = %s
+                  AND decision_status = 'APPROVED'
+                  AND remediation_status = 'OPEN'
+            """, (pkg,))
             failed += 1
 
-    # ==========================================
-    # COMMIT RESULTS
-    # ==========================================
-
     conn.commit()
-
-    print()
-    print(f'Remediated: {remediated}')
-    print(f'Failed: {failed}')
-
+    print(f"\nRemediated: {remediated} | Failed: {failed}")
     cursor.close()
     conn.close()
 
-except Exception as e:
 
-    print(f'Error: {e}')
-```
+if __name__ == "__main__":
+    main()

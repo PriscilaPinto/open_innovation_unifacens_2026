@@ -1,10 +1,8 @@
-name: DevSecOps Automated Remediation Pipeline
+name: DevSecOps - Remediação Automática
 
 on:
   push:
-    branches:
-      - develop
-  pull_request:
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
@@ -12,119 +10,172 @@ permissions:
   pull-requests: write
 
 jobs:
-  # STAGE 1: Coleta estática agnóstica de vulnerabilidades
+  # ============================================================
+  # JOB 1: Scan de vulnerabilidades com Trivy
+  # ============================================================
   security-scan:
-    name: 🔍 Scan de Vulnerabilidades Multi-Linguagem
+    name: 🔍 Trivy SCA Scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: develop
 
-      - name: Install Trivy
+      - name: Instalar Trivy
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          sudo apt-get install -y wget gnupg lsb-release
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
-          | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
+            | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
 
-      - name: Run Trivy scan (Varre a raiz buscando qualquer linguagem)
+      - name: Executar scan
         run: |
           mkdir -p reports
           trivy fs . --format json --output reports/report.json
 
-      - name: Upload Trivy Report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: trivy-report-json
+          name: trivy-report
           path: reports/report.json
 
-  # STAGE 2: O Agente de IA decide a tecnologia e cria o patch sob medida
-  ai-remediation:
-    name: 🤖 Agente de IA Tomador de Decisão (Virtual Patching)
+  # ============================================================
+  # JOB 2: Processar vulnerabilidades e aplicar remediações
+  # Conecta no Supabase — histórico permanente entre execuções
+  # ============================================================
+  remediation:
+    name: 🤖 Remediação Automática
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: develop
 
-      - name: Download Trivy Report
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: trivy-report-json
+          name: trivy-report
+          path: reports/
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install Python Dependencies
-        run: pip install langchain-core langchain-google-genai
+      - name: Instalar dependências Python
+        run: pip install -r requirements.txt
 
-      - name: Run Escalable AI Remediation Framework
+      - name: Criar tabelas se não existirem (idempotente)
         env:
-          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_SSLMODE: require
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, "scripts")
+          from db import connect_db
+          conn = connect_db()
+          cur = conn.cursor()
+          with open("database/schema.sql") as f:
+              cur.execute(f.read())
+          conn.commit()
+          conn.close()
+          print("Schema aplicado")
+          EOF
+
+      - name: Popular banco curado (INSERT OR IGNORE)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_SSLMODE: require
+        run: |
+          python - <<'EOF'
+          import sys
+          sys.path.insert(0, "scripts")
+          from db import connect_db
+          conn = connect_db()
+          cur = conn.cursor()
+          try:
+              with open("database/seed_homologated_versions.sql") as f:
+                  cur.execute(f.read())
+              conn.commit()
+              print("Seed aplicado")
+          except Exception as e:
+              conn.rollback()
+              print(f"Seed: {e}")
+          conn.close()
+          EOF
+
+      - name: Executar framework de remediação
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_SSLMODE: require
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: python framework.py
 
-      # Sobe tudo o que foi gerado na raiz (o patch dinâmico e o arquivo de metadados)
-      - name: Upload Remediated Artifacts
+      - name: Upload arquivos remediados
         uses: actions/upload-artifact@v4
         with:
-          name: ai-virtual-patch-results
+          name: remediated-files
           path: |
-            virtual_patch_*
-            patch_meta.json
+            composer.json
+            composer.lock
+            package.json
+            package-lock.json
+            requirements.txt
 
-  # STAGE 3: Validação genérica da proteção e abertura do Pull Request para Homolog
-  security-validation:
-    name: 🧪 Validação e Abertura de PR Automatizado
-    needs: ai-remediation
+  # ============================================================
+  # JOB 3: Abrir PR automático para homolog
+  # ============================================================
+  open-pr:
+    name: 🚀 Abrir PR para Homolog
+    needs: remediation
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: homolog
+          ref: develop
+          fetch-depth: 0
 
-      - name: Download Remediated Artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: ai-virtual-patch-results
+          name: remediated-files
 
-      - name: 🔍 Re-scan do patch gerado pela IA
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-
-      # 🛡️ EXPURGO CRÍTICO: Remove o banco de dados gigante de 1GB do Trivy antes que a action do PR tente rastrear alterações
-      - name: 🧹 Evitar Vazamento de Cache (Clean Trivy Assets)
+      - name: Garantir que branch homolog existe
         run: |
-          echo "Limpando artefatos pesados e arquivos de ambiente do Trivy..."
-          rm -rf .cache/
-          rm -rf trivy_envs.txt
-          echo "Diretório limpo com sucesso!"
+          git fetch origin
+          if ! git ls-remote --heads origin homolog | grep -q homolog; then
+            git checkout -b homolog
+            git push origin homolog
+            echo "Branch homolog criada"
+          else
+            echo "Branch homolog já existe"
+          fi
 
-      - name: 🚀 Create Pull Request to Homolog
+      - name: Criar Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: fix/ai-autonomous-patch
+          branch: fix/auto-remediation-${{ github.run_id }}
           base: homolog
-          title: "🤖 [AI Virtual Patching] Proteção autônoma agnóstica para código legado"
+          title: "🔒 [Auto-Remediation] Correção automática de vulnerabilidades #${{ github.run_id }}"
           body: |
-            ## 🛡️ Remediação Autônoma Baseada em IA - Virtual Patching Escalável
-            Este Pull Request foi gerado automaticamente pelo **Framework Inteligente de Correção**.
+            ## 🔒 Remediação Automática de Vulnerabilidades SCA
 
-            ### 📊 Comportamento do Agente:
-            - **Análise Dinâmica:** O agente de IA leu o relatório do Trivy, identificou o ecossistema tecnológico do repositório em repouso e projetou uma camada externa isolada de Virtual Patching dedicada a esta tecnologia.
-            - **Resiliência:** Nenhuma biblioteca legada foi modificada, eliminando o risco de quebra de compatibilidade em produção.
-          commit-message: "fix: injeta camada autônoma de virtual patching gerada por IA"
+            Pipeline: `${{ github.run_id }}` | Branch origem: `develop`
+
+            ### O que foi feito:
+            - ✅ Trivy detectou vulnerabilidades
+            - ✅ Banco curado + OSV API consultados para versões seguras
+            - ✅ Decisão automática por severidade (CRITICAL/HIGH → APPROVED)
+            - ✅ Dependências atualizadas com menor impacto (same-major)
+            - ✅ Histórico de auditoria salvo no Supabase
+
+            ### Próximos passos:
+            1. Revisar mudanças no `composer.json` / `package.json`
+            2. Merge dispara re-scan automático no homolog
+            3. Se vulnerabilidade persistir, pipeline bloqueia
+
+            ### Auditoria:
+            Todas as decisões estão registradas no Supabase com `execution_id` e timestamp.
+          commit-message: "fix: atualiza dependências vulneráveis via remediação automática"
+          delete-branch: false

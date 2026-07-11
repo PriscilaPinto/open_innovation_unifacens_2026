@@ -1,106 +1,69 @@
-import psycopg2
+"""
+STAGE 2 - Engine de Decisão
+Analisa vulnerabilidades OPEN e decide: APPROVED / MANUAL_REVIEW / IGNORE.
+Agrupa por pacote para evitar remediação duplicada do mesmo pacote.
+"""
+from dotenv import load_dotenv
+from db import connect_db
+
+load_dotenv()
+
+SEVERITY_ORDER = {"CRITICAL": 1, "HIGH": 2, "MEDIUM": 3, "LOW": 4, "UNKNOWN": 5}
 
 
-try:
-
-    conn = psycopg2.connect(
-        host='localhost',
-        port=5432,
-        database='remediation',
-        user='postgres',
-        password='postgres'
-    )
-
+def main():
+    conn = connect_db()
     cursor = conn.cursor()
 
-    # ==========================================
-    # GET OPEN VULNERABILITIES
-    # ==========================================
-
-    cursor.execute(
-        '''
-        SELECT
-            id,
-            severity,
-            recommended_version
-
+    # Busca um representante por pacote (pior severidade) entre os OPEN sem decisão
+    cursor.execute("""
+        SELECT DISTINCT ON (package_name)
+            id, package_name, severity, recommended_version
         FROM vulnerability_records
-
         WHERE remediation_status = 'OPEN'
-        '''
-    )
+          AND decision_status = 'PENDING'
+        ORDER BY package_name,
+            CASE severity
+                WHEN 'CRITICAL' THEN 1
+                WHEN 'HIGH'     THEN 2
+                WHEN 'MEDIUM'   THEN 3
+                WHEN 'LOW'      THEN 4
+                ELSE 5
+            END
+    """)
+    packages = cursor.fetchall()
 
-    vulnerabilities = cursor.fetchall()
+    approved = manual = ignored = 0
 
-    approved = 0
-    manual_review = 0
-    ignored = 0
+    for row in packages:
+        _, pkg, severity, recommended_version = row
 
-    # ==========================================
-    # DECISION ENGINE
-    # ==========================================
-
-    for vuln in vulnerabilities:
-
-        vulnerability_id = vuln[0]
-        severity = vuln[1]
-        recommended_version = vuln[2]
-
-        decision = 'MANUAL_REVIEW'
-
-        # ==========================================
-        # APPROVED REMEDIATION
-        # ==========================================
-
-        if severity in ['HIGH', 'CRITICAL'] and recommended_version:
-
-            decision = 'APPROVED'
-
+        if severity in ("CRITICAL", "HIGH") and recommended_version:
+            decision = "APPROVED"
             approved += 1
-
-        # ==========================================
-        # IGNORE LOW
-        # ==========================================
-
-        elif severity == 'LOW':
-
-            decision = 'IGNORE'
-
+        elif severity == "LOW":
+            decision = "IGNORE"
             ignored += 1
-
         else:
+            decision = "MANUAL_REVIEW"
+            manual += 1
 
-            manual_review += 1
-
-        # ==========================================
-        # UPDATE DECISION
-        # ==========================================
-
-        cursor.execute(
-            '''
+        # Aplica a decisão a TODAS as CVEs do mesmo pacote
+        cursor.execute("""
             UPDATE vulnerability_records
-
             SET decision_status = %s
+            WHERE package_name = %s
+              AND remediation_status = 'OPEN'
+              AND decision_status = 'PENDING'
+        """, (decision, pkg))
 
-            WHERE id = %s
-            ''',
-            (
-                decision,
-                vulnerability_id
-            )
-        )
-
-        print(f'Vulnerability decision: {decision}')
+        print(f"  {pkg}: {decision} (severity: {severity})")
 
     conn.commit()
-
-    print(f'Approved: {approved}')
-    print(f'Manual Review: {manual_review}')
-    print(f'Ignored: {ignored}')
-
+    print(f"\nApproved: {approved} | Manual Review: {manual} | Ignored: {ignored}")
     cursor.close()
     conn.close()
 
-except Exception as e:
 
-    print(f'Error: {e}')
+if __name__ == "__main__":
+    main()
