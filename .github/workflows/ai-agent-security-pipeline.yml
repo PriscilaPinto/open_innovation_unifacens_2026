@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   # ============================================================
-  # JOB 1: Scan de vulnerabilidades com Trivy
+  # JOB 1: Scan de vulnerabilidades (develop — somente leitura)
   # ============================================================
   security-scan:
     name: 🔍 Trivy SCA Scan
@@ -23,11 +23,11 @@ jobs:
 
       - name: Instalar Trivy
         run: |
-          sudo apt-get install -y wget gnupg lsb-release
+          sudo apt-get install -y wget gnupg lsb-release --quiet
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
             | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
+          sudo apt-get update -qq && sudo apt-get install -y trivy
 
       - name: Executar scan
         run: |
@@ -36,25 +36,31 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: trivy-report
+          name: trivy-report-${{ github.run_id }}
           path: reports/report.json
 
   # ============================================================
-  # JOB 2: Processar vulnerabilidades e aplicar remediações
-  # Conecta no Supabase — histórico permanente entre execuções
+  # JOB 2: Aplicar remediações e commitar em branch isolada
+  #
+  # IMPORTANTE: develop NÃO é alterado.
+  # As correções são aplicadas em fix/auto-remediation-{run_id}
+  # que é criada a partir de develop neste job.
   # ============================================================
   remediation:
-    name: 🤖 Remediação Automática
+    name: 🤖 Remediação e Commit na Branch de Fix
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: develop
+          fetch-depth: 0
+          # token com permissão de push para criar a branch de fix
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/download-artifact@v4
         with:
-          name: trivy-report
+          name: trivy-report-${{ github.run_id }}
           path: reports/
 
       - uses: actions/setup-python@v5
@@ -62,27 +68,9 @@ jobs:
           python-version: '3.10'
 
       - name: Instalar dependências Python
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt --quiet
 
-      - name: Criar tabelas se não existirem (idempotente)
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DB_SSLMODE: require
-        run: |
-          python - <<'EOF'
-          import sys, os
-          sys.path.insert(0, "scripts")
-          from db import connect_db
-          conn = connect_db()
-          cur = conn.cursor()
-          with open("database/schema.sql") as f:
-              cur.execute(f.read())
-          conn.commit()
-          conn.close()
-          print("Schema aplicado")
-          EOF
-
-      - name: Popular banco curado (INSERT OR IGNORE)
+      - name: Garantir schema e seed no Supabase (idempotente)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DB_SSLMODE: require
@@ -91,8 +79,15 @@ jobs:
           import sys
           sys.path.insert(0, "scripts")
           from db import connect_db
+
           conn = connect_db()
           cur = conn.cursor()
+
+          with open("database/schema.sql") as f:
+              cur.execute(f.read())
+          conn.commit()
+          print("Schema aplicado")
+
           try:
               with open("database/seed_homologated_versions.sql") as f:
                   cur.execute(f.read())
@@ -100,7 +95,8 @@ jobs:
               print("Seed aplicado")
           except Exception as e:
               conn.rollback()
-              print(f"Seed: {e}")
+              print(f"Seed já populado: {e}")
+
           conn.close()
           EOF
 
@@ -112,35 +108,36 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: python framework.py
 
-      - name: Upload arquivos remediados
-        uses: actions/upload-artifact@v4
-        with:
-          name: remediated-files
-          path: |
-            composer.json
-            composer.lock
-            package.json
-            package-lock.json
-            requirements.txt
+      # Criar branch isolada a partir de develop e commitar as correções
+      # develop permanece inalterado
+      - name: Criar branch de fix e commitar correções
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="fix/auto-remediation-${{ github.run_id }}"
 
-  # ============================================================
-  # JOB 3: Abrir PR automático para homolog
-  # ============================================================
-  open-pr:
-    name: 🚀 Abrir PR para Homolog
-    needs: remediation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: develop
-          fetch-depth: 0
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: remediated-files
+          # Cria branch a partir do HEAD de develop (sem afetar develop)
+          git checkout -b "$BRANCH"
 
-      - name: Garantir que branch homolog existe
+          # Adiciona apenas os arquivos de dependências que o framework pode ter alterado
+          git add composer.json composer.lock package.json package-lock.json requirements.txt 2>/dev/null || true
+
+          # Só commita se houver mudanças reais
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração detectada — vulnerabilidades já corrigidas ou sem versão disponível."
+          else
+            git commit -m "fix: remediação automática de vulnerabilidades (run #${{ github.run_id }})"
+            git push origin "$BRANCH"
+            echo "BRANCH_PUSHED=true" >> $GITHUB_ENV
+          fi
+
+          echo "FIX_BRANCH=$BRANCH" >> $GITHUB_ENV
+
+      # Garantir que homolog existe antes de abrir o PR
+      - name: Garantir branch homolog
         run: |
           git fetch origin
           if ! git ls-remote --heads origin homolog | grep -q homolog; then
@@ -151,31 +148,34 @@ jobs:
             echo "Branch homolog já existe"
           fi
 
-      - name: Criar Pull Request
+      # Abre PR somente se houve commit com correção
+      - name: Abrir PR para homolog
+        if: env.BRANCH_PUSHED == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: fix/auto-remediation-${{ github.run_id }}
+          branch: ${{ env.FIX_BRANCH }}
           base: homolog
-          title: "🔒 [Auto-Remediation] Correção automática de vulnerabilidades #${{ github.run_id }}"
+          title: "🔒 [Auto-Remediation] Correção de vulnerabilidades — run #${{ github.run_id }}"
           body: |
             ## 🔒 Remediação Automática de Vulnerabilidades SCA
 
-            Pipeline: `${{ github.run_id }}` | Branch origem: `develop`
+            **Pipeline:** `${{ github.run_id }}` | **Origem:** `develop` | **Destino:** `homolog`
 
-            ### O que foi feito:
-            - ✅ Trivy detectou vulnerabilidades
-            - ✅ Banco curado + OSV API consultados para versões seguras
+            ### O que foi feito
+            - ✅ Trivy detectou vulnerabilidades em `develop`
+            - ✅ Banco curado (Supabase) + OSV API consultados para versões seguras
             - ✅ Decisão automática por severidade (CRITICAL/HIGH → APPROVED)
-            - ✅ Dependências atualizadas com menor impacto (same-major)
+            - ✅ Dependências atualizadas com estratégia same-major (menor impacto)
+            - ✅ Correções commitadas nesta branch — `develop` **não foi alterado**
             - ✅ Histórico de auditoria salvo no Supabase
 
-            ### Próximos passos:
-            1. Revisar mudanças no `composer.json` / `package.json`
-            2. Merge dispara re-scan automático no homolog
-            3. Se vulnerabilidade persistir, pipeline bloqueia
+            ### Próximos passos
+            1. Revisar as mudanças nos arquivos de dependências
+            2. Mergear este PR — a segunda pipeline valida automaticamente
+            3. Se vuln persistir após merge, o security gate bloqueia e registra rollback
 
-            ### Auditoria:
-            Todas as decisões estão registradas no Supabase com `execution_id` e timestamp.
-          commit-message: "fix: atualiza dependências vulneráveis via remediação automática"
+            ### Auditoria
+            Todas as decisões estão registradas no Supabase com `execution_id` e timestamp por execução.
+          commit-message: "fix: remediação automática de vulnerabilidades"
           delete-branch: false

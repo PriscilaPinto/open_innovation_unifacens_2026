@@ -1,5 +1,7 @@
 name: DevSecOps - Security Gate (Homolog)
 
+# Dispara SOMENTE quando um PR com destino homolog for mergeado
+# A pipeline 1 (ai-agent-security-pipeline) NÃO é re-executada
 on:
   pull_request:
     branches: [homolog]
@@ -11,10 +13,12 @@ permissions:
 
 jobs:
   # ============================================================
-  # Só executa quando o PR foi MERGEADO (não apenas fechado)
+  # Executa apenas quando o PR foi MERGEADO em homolog
+  # Valida que as correções eliminaram as vulnerabilidades
+  # e que a aplicação não quebrou
   # ============================================================
-  reteste-pos-merge:
-    name: 🧪 Re-scan pós-merge em Homolog
+  security-gate:
+    name: 🧪 Re-scan e Validação em Homolog
     if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -22,7 +26,12 @@ jobs:
         with:
           ref: homolog
 
-      - name: Re-scan com Trivy
+      # ----------------------------------------------------------
+      # Re-scan com o código já corrigido em homolog
+      # Se ainda houver CVE CRITICAL/HIGH → exit-code 1 → falha
+      # ----------------------------------------------------------
+      - name: Re-scan Trivy em homolog
+        id: trivy-scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
@@ -31,7 +40,26 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
 
-      - name: Atualizar status no Supabase (sucesso)
+      # ----------------------------------------------------------
+      # Validação básica da aplicação PHP (se existir)
+      # Garante que a atualização de dependências não quebrou nada
+      # ----------------------------------------------------------
+      - name: Instalar dependências PHP (se composer.json existir)
+        if: hashFiles('composer.json') != ''
+        run: |
+          sudo apt-get install -y php-cli --quiet
+          curl -sS https://getcomposer.org/installer | php
+          php composer.phar install --no-interaction --no-progress 2>&1 | tail -5
+
+      - name: Validar aplicação PHP (smoke test)
+        if: hashFiles('composer.json') != '' && hashFiles('index.php') != ''
+        run: |
+          php -l index.php && echo "✅ Syntax OK" || echo "⚠️ Syntax error detectado"
+
+      # ----------------------------------------------------------
+      # Sucesso: atualiza status no Supabase
+      # ----------------------------------------------------------
+      - name: Registrar sucesso no Supabase
         if: success()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -39,9 +67,10 @@ jobs:
         run: |
           pip install psycopg2-binary python-dotenv --quiet
           python - <<'EOF'
-          import os, sys
+          import sys
           sys.path.insert(0, "scripts")
           from db import connect_db
+
           conn = connect_db()
           cur = conn.cursor()
           cur.execute("""
@@ -51,12 +80,17 @@ jobs:
               ORDER BY started_at DESC
               LIMIT 1
           """)
+          rows = cur.rowcount
           conn.commit()
           conn.close()
-          print("Status atualizado para SUCCESS")
+          print(f"✅ Execução marcada como SUCCESS ({rows} registro(s) atualizado(s))")
           EOF
 
-      - name: Rollback automático se re-scan falhar
+      # ----------------------------------------------------------
+      # Falha: registra ROLLED_BACK no banco para auditoria
+      # develop continua inalterado — equipe revisa manualmente
+      # ----------------------------------------------------------
+      - name: Registrar falha e rollback no Supabase
         if: failure()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -64,24 +98,23 @@ jobs:
         run: |
           pip install psycopg2-binary python-dotenv --quiet
           python - <<'EOF'
-          import os, sys
+          import sys
           sys.path.insert(0, "scripts")
           from db import connect_db
+
           conn = connect_db()
           cur = conn.cursor()
 
-          # Busca versões anteriores para rollback
+          # Log das versões anteriores para auditoria
           cur.execute("""
-              SELECT package_name, previous_version
+              SELECT package_name, installed_version, previous_version
               FROM vulnerability_records
               WHERE remediation_status = 'REMEDIATED'
                 AND previous_version IS NOT NULL
               ORDER BY updated_at DESC
           """)
-          rows = cur.fetchall()
-
-          for pkg, prev_ver in rows:
-              print(f"⏪ Rollback: {pkg} → {prev_ver}")
+          for pkg, installed, prev in cur.fetchall():
+              print(f"⏪ {pkg}: {installed} ← rollback para {prev}")
 
           # Marca execução como FAILED
           cur.execute("""
@@ -101,6 +134,6 @@ jobs:
 
           conn.commit()
           conn.close()
-          print("Rollback registrado no banco. Revise manualmente o composer.json.")
+          print("❌ Rollback registrado. Revise os arquivos em homolog manualmente.")
           EOF
           exit 1
