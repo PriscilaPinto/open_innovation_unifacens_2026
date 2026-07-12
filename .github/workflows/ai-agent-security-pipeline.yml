@@ -51,7 +51,7 @@ jobs:
   # Branch intermediária: fix-remediation (nome fixo, sobrescrita a cada run)
   # ============================================================
   remediation:
-    name: 🤖 Agente IA - Remediação e Merge em Homolog
+    name: 🤖 Agente IA - Remediação (develop → fix/remediation)
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
@@ -92,13 +92,17 @@ jobs:
           conn = connect_db()
           cur = conn.cursor()
 
+          # Schema principal
           with open("database/schema.sql") as f:
               cur.execute(f.read())
           conn.commit()
+          print("✅ Schema principal aplicado")
 
+          # Todas as migrations em um arquivo
           with open("database/migrate_add_previous_version.sql") as f:
               cur.execute(f.read())
           conn.commit()
+          print("✅ Migrations aplicadas (previous_version + source_db)")
 
           # Remove entradas erradas do psr7 e força re-seed
           cur.execute("""
@@ -107,18 +111,19 @@ jobs:
                 AND safe_version = '1.9.1'
           """)
           conn.commit()
+          print("✅ Cleanup: versão psr7 1.9.1 removida")
 
           try:
               with open("database/seed_homologated_versions.sql") as f:
                   cur.execute(f.read())
               conn.commit()
-              print("Seed aplicado")
+              print("✅ Seed aplicado")
           except Exception as e:
               conn.rollback()
-              print(f"Seed ja populado: {e}")
+              print(f"⚠️  Seed já populado: {e}")
 
           conn.close()
-          print("Schema + migrations aplicados")
+          print("✅ BD pronto: schema + migrations + seed!")
           EOF
 
       # Agente de IA orquestra todo o pipeline:
@@ -138,16 +143,9 @@ jobs:
           AI_MAX_TOKENS: "600"
         run: python framework.py
 
-      # Stage 4: Re-scan Trivy pós-patch (multi-linguagem)
-      # Trivy está instalado no Job 1, mas não no PATH do Python
-      # Por isso o re-scan é feito aqui como step do workflow
-      - name: Re-scan Trivy pós-patch (Stage 4)
-        run: |
-          mkdir -p reports
-          trivy fs . --format json --output reports/report_post_patch.json \
-            --skip-version-check || true
-          trivy fs . --format table --severity CRITICAL,HIGH \
-            --skip-version-check || true
+      # Stage 4: Re-scan Trivy é feito na security-gate em homolog
+      # (não repetir aqui — trivy não está instalado neste job)
+      # Responsabilidade: job security-scan instala trivy, não este job
 
       # Smoke test multilinguagem (Req 8)
       - name: Smoke test (validação de estabilidade)

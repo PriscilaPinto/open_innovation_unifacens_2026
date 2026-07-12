@@ -182,12 +182,14 @@ def query_vulnerability_data(cur, package_name, installed_version, ecosystem):
     return None
 
 
-def persist_vulnerability_record(cur, conn, execution_id, vuln_data, vdata):
+def persist_vulnerability_record(cur, conn, execution_id, vuln_data, vdata, ecosystem):
     """
     Insere registro de vulnerabilidade no Supabase.
     Requisito 5: Verificar duplicação ANTES de inserir.
+    Requisito: Multi-linguagem — salva ecossistema da vulnerabilidade
     
     vdata: resultado de query_vulnerability_data()
+    ecosystem: PHP, Node.js, Python, UNKNOWN
     """
     cve_id = vuln_data.get("VulnerabilityID")
     pkg = vuln_data.get("PkgName")
@@ -202,11 +204,11 @@ def persist_vulnerability_record(cur, conn, execution_id, vuln_data, vdata):
                 INSERT INTO vulnerability_records
                     (execution_id, cve_id, package_name, severity,
                      installed_version, fixed_version, remediation_status,
-                     osv_reference, recommended_version, source_db)
-                VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                     osv_reference, recommended_version, source_db, ecosystem)
+                VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s, %s)
             """, (
                 execution_id, cve_id, pkg, severity, version, fixed_ver,
-                None, None, "NONE"
+                None, None, "NONE", ecosystem
             ))
             conn.commit()
         except Exception as e:
@@ -224,11 +226,11 @@ def persist_vulnerability_record(cur, conn, execution_id, vuln_data, vdata):
             INSERT INTO vulnerability_records
                 (execution_id, cve_id, package_name, severity,
                  installed_version, fixed_version, remediation_status,
-                 osv_reference, recommended_version, source_db)
-            VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                 osv_reference, recommended_version, source_db, ecosystem)
+            VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s, %s)
         """, (
             execution_id, cve_id, pkg, severity, version, fixed_ver,
-            osv_ref, rec_ver, source
+            osv_ref, rec_ver, source, ecosystem
         ))
         conn.commit()
     except Exception as e:
@@ -239,13 +241,14 @@ def persist_vulnerability_record(cur, conn, execution_id, vuln_data, vdata):
 def main(execution_id, report_path="reports/report.json"):
     """
     STAGE 1: Lê relatório Trivy, consulta OSV/curado, persiste no Supabase.
+    AGORA: Multi-linguagem verdadeiro — detecta ecossistema de CADA vulnerabilidade
     
     Req 3: Consulta OSV
     Req 12: Histórico persistente
     Req 5: Sem duplicação
     """
     print("\n" + "=" * 60)
-    print("STAGE 1 — Persistência + Consulta OSV/Curado")
+    print("STAGE 1 — Persistência + Consulta OSV/Curado (Multi-Linguagem)")
     print("=" * 60)
     
     try:
@@ -272,34 +275,41 @@ def main(execution_id, report_path="reports/report.json"):
     
     print(f"Vulnerabilidades detectadas: {total_vulns}")
     
-    # Detecta ecossistema (necessário para OSV API)
-    try:
-        from context_collector import detect_ecosystem
-        context = detect_ecosystem()
-        ecosystem = context.get("curated_ecosystem", "PHP")
-    except ImportError:
-        ecosystem = "PHP"
-    
     count = 0
     for result in results:
+        # Detecta ecossistema DESTA vulnerabilidade (Trivy retorna "Type": "composer" ou "pip" ou "npm")
+        result_ecosystem = result.get("Type", "").lower()
+        
+        # Map Trivy type → nosso ecosystem
+        if "composer" in result_ecosystem:
+            ecosystem = "PHP"
+        elif "npm" in result_ecosystem or "package" in result_ecosystem.lower():
+            ecosystem = "Node.js"
+        elif "pip" in result_ecosystem or "poetry" in result_ecosystem:
+            ecosystem = "Python"
+        else:
+            ecosystem = "UNKNOWN"
+        
+        print(f"\n🌍 Ecossistema: {ecosystem} (Type: {result.get('Type')})")
+        
         for vuln in (result.get("Vulnerabilities") or []):
             count += 1
             pkg = vuln.get("PkgName")
             version = vuln.get("InstalledVersion")
             sev = vuln.get("Severity", "UNKNOWN")
             
-            print(f"\n  [{count}] {pkg}:{version} [{sev}]")
+            print(f"  [{count}] {pkg}:{version} [{sev}]")
             
-            # Consulta dados de vulnerabilidade
+            # Consulta dados de vulnerabilidade (usa ecosystem correto)
             vdata = query_vulnerability_data(cur, pkg, version, ecosystem)
             
-            # Persiste registro (com OSV ID se disponível)
-            persist_vulnerability_record(cur, conn, execution_id, vuln, vdata)
+            # Persiste registro (com ecossistema rastreado)
+            persist_vulnerability_record(cur, conn, execution_id, vuln, vdata, ecosystem)
     
     cur.close()
     conn.close()
     
-    print(f"\n✅ {count} registros persistidos no Supabase")
+    print(f"\n✅ {count} registros persistidos no Supabase (multi-linguagem)")
     return count
 
 
