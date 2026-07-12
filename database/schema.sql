@@ -36,24 +36,13 @@ CREATE TABLE IF NOT EXISTS vulnerability_records (
     previous_version    TEXT,                          -- salvo antes de remediar (rollback)
     fixed_version       TEXT,
     recommended_version TEXT,
-    osv_reference       TEXT,
+    osv_reference       TEXT,                          -- GHSA-xxx-yyy-zzz ou NULL
+    source_db           TEXT DEFAULT 'UNKNOWN',        -- CURATED_DB | OSV_API | NONE | UNKNOWN
     decision_status     TEXT DEFAULT 'PENDING',        -- PENDING | APPROVED | MANUAL_REVIEW | IGNORE
     remediation_status  TEXT DEFAULT 'OPEN',           -- OPEN | REMEDIATED | FAILED | ROLLED_BACK
     ai_justification    TEXT,
     created_at          TIMESTAMP DEFAULT NOW(),
     updated_at          TIMESTAMP DEFAULT NOW()
-);
-
--- ------------------------------------------
--- Pull Requests gerados automaticamente
--- ------------------------------------------
-CREATE TABLE IF NOT EXISTS pull_requests (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    execution_id    UUID REFERENCES pipeline_executions(id),
-    pr_number       INTEGER,
-    pr_url          TEXT,
-    approval_status TEXT DEFAULT 'PENDING',            -- PENDING | APPROVED | REJECTED
-    created_at      TIMESTAMP DEFAULT NOW()
 );
 
 -- ------------------------------------------

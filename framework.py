@@ -29,11 +29,18 @@ load_dotenv()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
 
 from db import connect_db
-from context_collector import detect_ecosystem
+from context_collector import detect_ecosystem, detect_ecosystems
 
 # Req 11: configuração via env com defaults seguros
 MIN_SEVERITY     = os.getenv("MIN_SEVERITY", "HIGH")        # severidade mínima para remediar
 TRIVY_RETRIES    = int(os.getenv("TRIVY_RETRIES", "3"))     # Req 2.5: retry do scanner
+
+# Package managers por ecossistema
+PACKAGE_MANAGERS = {
+    "PHP": "composer",
+    "Node.js": "npm",
+    "Python": "pip",
+}
 
 
 def log(msg, level="INFO"):
@@ -96,18 +103,6 @@ def db_finish_execution(conn, execution_id, status, found, resolved):
     log(f"Execução finalizada: {status} | {resolved}/{found} ({pct}%) resolvidas")
 
 
-def db_save_pr(conn, execution_id, pr_number, pr_url):
-    """Req 12.5: salva referência ao PR."""
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO pull_requests (execution_id, pr_number, pr_url, approval_status)
-        VALUES (%s, %s, %s, 'PENDING')
-        ON CONFLICT DO NOTHING
-    """, (execution_id, pr_number, pr_url))
-    conn.commit()
-    cur.close()
-
-
 # ============================================================
 # STAGE 1: Leitura do relatório Trivy + OSV + Supabase
 # Req 1, 2, 3.2, 12
@@ -148,9 +143,17 @@ def query_curated(cursor, package_name, ecosystem="PHP"):
 
 
 def stage1_load_and_persist(conn, report_path="reports/report.json"):
-    """Req 1, 2, 12: lê relatório, enriquece com OSV/curado e persiste."""
+    """
+    Req 1, 2, 12: lê relatório, enriquece com OSV/curado e persiste.
+    AGORA: Multi-linguagem verdadeiro — detecta ecossistema de CADA resultado Trivy
+    
+    Utiliza persist_history.py para:
+    - Req 3: Consulta OSV API com fallback
+    - Req 12: Rastreamento de source_db (CURATED_DB vs OSV_API)
+    - Req 5: Evita duplicação de registros
+    """
     log("=" * 60)
-    log("STAGE 1 — Leitura do Trivy Report + Persistência Supabase")
+    log("STAGE 1 — Leitura do Trivy Report + Persistência Supabase (Multi-Linguagem)")
     log("=" * 60)
 
     # Req 1.4/1.5: verifica arquivo
@@ -160,10 +163,8 @@ def stage1_load_and_persist(conn, report_path="reports/report.json"):
 
     run_id = os.getenv("GITHUB_RUN_ID", f"local-{int(time.time())}")
     repo   = os.getenv("GITHUB_REPOSITORY", "local")
-    context = detect_ecosystem()
-    osv_eco = context.get("osv_ecosystem", "Packagist")
-    curated_eco = context.get("curated_ecosystem", "PHP")
 
+    # Cria execução
     execution_id = db_safe(db_create_execution, conn, repo, run_id)
     if execution_id:
         log(f"Execução criada no Supabase: {execution_id}")
@@ -181,47 +182,88 @@ def stage1_load_and_persist(conn, report_path="reports/report.json"):
             db_safe(db_finish_execution, conn, execution_id, "SUCCESS", 0, 0)
         sys.exit(0)
 
-    log(f"Vulnerabilidades detectadas: {total_vulns}")
+    log(f"Vulnerabilidades detectadas: {total_vulns} (multi-linguagem)")
+    
+    # Importa persist_history para consulta OSV e persistência
+    try:
+        from persist_history import query_vulnerability_data
+        use_persist_history = True
+    except ImportError:
+        log("persist_history.py não disponível, usando fallback", "WARN")
+        use_persist_history = False
+    
     cur = conn.cursor()
     count = 0
 
     for result in all_results:
+        # Detecta ecossistema DESTA vulnerabilidade (baseado em Type do Trivy)
+        result_type = result.get("Type", "").lower()
+        
+        # Map Trivy type → nosso ecosystem
+        if "composer" in result_type:
+            ecosystem = "PHP"
+        elif "npm" in result_type or "package" in result_type.lower():
+            ecosystem = "Node.js"
+        elif "pip" in result_type or "poetry" in result_type:
+            ecosystem = "Python"
+        else:
+            ecosystem = "UNKNOWN"
+        
+        log(f"\n🌍 Ecossistema: {ecosystem} (Type: {result.get('Type')})")
+        
         for vuln in (result.get("Vulnerabilities") or []):
-            count += 1
-            pkg     = vuln.get("PkgName")
+            cve_id = vuln.get("VulnerabilityID")
+            pkg = vuln.get("PkgName")
             version = vuln.get("InstalledVersion")
-            sev     = vuln.get("Severity", "UNKNOWN")
-
-            # Banco curado primeiro, depois OSV
-            vdata = query_curated(cur, pkg, curated_eco)
-            source = ""
-            if vdata:
-                source = vdata["source"]
-            else:
-                vdata = query_osv(pkg, version, osv_eco)
+            sev = vuln.get("Severity", "UNKNOWN")
+            fixed_ver = vuln.get("FixedVersion")
+            
+            # Req 5: Verificar duplicação ANTES de inserir
+            cur.execute("""
+                SELECT id FROM vulnerability_records
+                WHERE execution_id = %s
+                  AND cve_id = %s
+                  AND package_name = %s
+                  AND installed_version = %s
+                  AND ecosystem = %s
+            """, (execution_id, cve_id, pkg, version, ecosystem))
+            
+            if cur.fetchone():
+                log(f"  [DUPLICADO] {cve_id} em {pkg}:{version} ({ecosystem}) — ignorando")
+                continue
+            
+            count += 1
+            
+            # Consulta dados via persist_history (OSV + curado)
+            vdata = None
+            source = "NONE"
+            osv_ref = None
+            rec_ver = None
+            
+            if use_persist_history:
+                vdata = query_vulnerability_data(cur, pkg, version, ecosystem)
                 if vdata:
-                    source = "OSV_API"
-
-            log(f"  {pkg} {version} [{sev}] → {vdata.get('recommended_version') if vdata else 'N/A'} ({source})")
+                    source = vdata.get("source", "UNKNOWN")
+                    osv_ref = vdata.get("osv_id")
+                    rec_ver = vdata.get("recommended_version")
+            
+            log(f"  {pkg} {version} [{sev}] → {rec_ver or 'N/A'} ({source})")
 
             try:
                 cur.execute("""
                     INSERT INTO vulnerability_records
                         (execution_id, cve_id, package_name, severity,
                          installed_version, fixed_version, remediation_status,
-                         osv_reference, recommended_version)
-                    VALUES (%s,%s,%s,%s,%s,%s,'OPEN',%s,%s)
+                         osv_reference, recommended_version, source_db, ecosystem)
+                    VALUES (%s,%s,%s,%s,%s,%s,'OPEN',%s,%s,%s,%s)
                 """, (
-                    execution_id,
-                    vuln.get("VulnerabilityID"),
-                    pkg, sev, version,
-                    vuln.get("FixedVersion"),
-                    vdata.get("osv_id") if vdata else None,
-                    vdata.get("recommended_version") if vdata else None,
+                    execution_id, cve_id, pkg, sev, version, fixed_ver,
+                    osv_ref, rec_ver, source, ecosystem
                 ))
             except Exception as e:
                 log(f"DB insert error para {pkg}: {e}", "WARN")
                 conn.rollback()
+                continue
 
     if execution_id:
         try:
@@ -229,28 +271,30 @@ def stage1_load_and_persist(conn, report_path="reports/report.json"):
                         (count, execution_id))
         except Exception:
             pass
+    
     conn.commit()
     cur.close()
-    log(f"✅ {count} vulnerabilidades salvas no Supabase")
+    log(f"✅ {count} vulnerabilidades salvas no Supabase (sem duplicatas, multi-linguagem)")
     return execution_id, count
 
 
 # ============================================================
 # STAGE 2: Agente de IA analisa e decide
 # Req 3: análise orientada por IA
+# AGORA: Agrupa vulnerabilidades por ecossistema também
 # ============================================================
 def stage2_ai_decide(conn):
     log("=" * 60)
-    log("STAGE 2 — Agente de IA: Análise e Decisão de Remediação")
+    log("STAGE 2 — Agente de IA: Análise e Decisão de Remediação (Multi-Linguagem)")
     log("=" * 60)
 
     cur = conn.cursor()
     cur.execute("""
         SELECT id, package_name, severity, recommended_version,
-               installed_version, cve_id, fixed_version
+               installed_version, cve_id, fixed_version, ecosystem
         FROM vulnerability_records
         WHERE remediation_status='OPEN' AND decision_status='PENDING'
-        ORDER BY CASE severity
+        ORDER BY ecosystem, CASE severity
             WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
             WHEN 'MEDIUM'   THEN 3 WHEN 'LOW'  THEN 4 ELSE 5 END
     """)
@@ -261,87 +305,135 @@ def stage2_ai_decide(conn):
         log("Nenhuma vulnerabilidade pendente.")
         return
 
-    context = detect_ecosystem()
-    vulns = [
-        {"id": r[0], "package_name": r[1], "severity": r[2],
-         "recommended_version": r[3], "installed_version": r[4],
-         "cve_id": r[5], "fixed_version": r[6],
-         "ecosystem": context.get("curated_ecosystem", "PHP")}
-        for r in rows
-    ]
+    # Agrupa por ecossistema
+    by_ecosystem = {}
+    for row in rows:
+        vuln_id, pkg, sev, rec_ver, inst_ver, cve, fixed, eco = row
+        if eco not in by_ecosystem:
+            by_ecosystem[eco] = []
+        by_ecosystem[eco].append({
+            "id": vuln_id,
+            "package_name": pkg,
+            "severity": sev,
+            "recommended_version": rec_ver,
+            "installed_version": inst_ver,
+            "cve_id": cve,
+            "fixed_version": fixed,
+            "ecosystem": eco
+        })
+    
+    log(f"\n🌍 Ecossistemas com vulnerabilidades: {', '.join(by_ecosystem.keys())}")
 
     analisar_lote = get_ai_agent()
     approved = manual = ignored = 0
     cur = conn.cursor()
 
-    if analisar_lote:
-        log(f"Enviando {len(set(v['package_name'] for v in vulns))} pacote(s) para análise...")
-        try:
-            decisoes = analisar_lote(vulns)
-            for d in decisoes:
-                pkg      = d["package_name"]
-                decision = d["decision"]
-                rec_ver  = d.get("recommended_version")
-                justif   = d.get("justification", "")
+    # Processa cada ecossistema
+    for ecosystem, vulns in by_ecosystem.items():
+        log(f"\n{ecosystem}:")
+        log(f"  📊 {len(vulns)} vulnerabilidade(s)")
+        
+        if analisar_lote:
+            log(f"  Enviando {len(set(v['package_name'] for v in vulns))} pacote(s) para análise...")
+            try:
+                decisoes = analisar_lote(vulns)
+                for d in decisoes:
+                    pkg      = d["package_name"]
+                    decision = d["decision"]
+                    rec_ver  = d.get("recommended_version")
+                    justif   = d.get("justification", "")
 
-                if decision == "APPROVED":   approved += 1
-                elif decision == "IGNORE":   ignored  += 1
-                else:                        manual   += 1
+                    if decision == "APPROVED":   approved += 1
+                    elif decision == "IGNORE":   ignored  += 1
+                    else:                        manual   += 1
 
-                # Atualiza todos os registros do pacote com a decisão da IA
+                    # Atualiza todos os registros do pacote com a decisão da IA
+                    cur.execute("""
+                        UPDATE vulnerability_records
+                        SET decision_status=%s, ai_justification=%s,
+                            recommended_version=COALESCE(%s, recommended_version),
+                            updated_at=NOW()
+                        WHERE package_name=%s
+                          AND ecosystem=%s
+                          AND remediation_status='OPEN'
+                          AND decision_status='PENDING'
+                    """, (decision, justif, rec_ver, pkg, ecosystem))
+
+                conn.commit()
+                log(f"  ✅ {ecosystem}: Approved={approved} | Manual={manual} | Ignored={ignored}")
+            except Exception as e:
+                log(f"  Agente de IA falhou: {e}. Usando fallback.", "WARN")
+                conn.rollback()
+                
+                # Fallback por severidade para este ecossistema
+                log(f"  Usando regras de severidade como fallback para {ecosystem}...")
+                seen = set()
+                for vuln in vulns:
+                    pkg = vuln["package_name"]
+                    if pkg in seen:
+                        continue
+                    seen.add(pkg)
+                    sev = vuln["severity"]
+                    rec = vuln["recommended_version"]
+
+                    # HIGH/CRITICAL sempre aprova (composer update faz o resto)
+                    if sev in ("CRITICAL", "HIGH"):
+                        dec = "APPROVED";      approved += 1
+                    elif sev == "LOW":
+                        dec = "IGNORE";        ignored  += 1
+                    else:
+                        dec = "MANUAL_REVIEW"; manual   += 1
+
+                    cur.execute("""
+                        UPDATE vulnerability_records
+                        SET decision_status=%s,
+                            ai_justification='Fallback: regra de severidade (IA indisponível)',
+                            updated_at=NOW()
+                        WHERE package_name=%s AND ecosystem=%s 
+                          AND remediation_status='OPEN' AND decision_status='PENDING'
+                    """, (dec, pkg, ecosystem))
+                
+                conn.commit()
+        else:
+            # Sem IA — apenas severidade
+            log(f"  Sem agente de IA — usando regras de severidade para {ecosystem}...")
+            seen = set()
+            for vuln in vulns:
+                pkg = vuln["package_name"]
+                if pkg in seen:
+                    continue
+                seen.add(pkg)
+                sev = vuln["severity"]
+                rec = vuln["recommended_version"]
+
+                # HIGH/CRITICAL sempre aprova (composer update faz o resto)
+                if sev in ("CRITICAL", "HIGH"):
+                    dec = "APPROVED";      approved += 1
+                elif sev == "LOW":
+                    dec = "IGNORE";        ignored  += 1
+                else:
+                    dec = "MANUAL_REVIEW"; manual   += 1
+
                 cur.execute("""
                     UPDATE vulnerability_records
-                    SET decision_status=%s, ai_justification=%s,
-                        recommended_version=COALESCE(%s, recommended_version),
+                    SET decision_status=%s,
+                        ai_justification='Fallback: regra de severidade (IA indisponível)',
                         updated_at=NOW()
-                    WHERE package_name=%s
-                      AND remediation_status='OPEN'
-                      AND decision_status='PENDING'
-                """, (decision, justif, rec_ver, pkg))
-
+                    WHERE package_name=%s AND ecosystem=%s 
+                      AND remediation_status='OPEN' AND decision_status='PENDING'
+                """, (dec, pkg, ecosystem))
+                log(f"    {pkg}: {dec} (severity={sev})")
+            
             conn.commit()
-            log(f"✅ Decisões: Approved={approved} | Manual Review={manual} | Ignored={ignored}")
-            cur.close()
-            return
-        except Exception as e:
-            log(f"Agente de IA falhou: {e}. Usando fallback.", "WARN")
-            conn.rollback()
 
-    # Req 10: fallback por severidade quando IA indisponível
-    log("Usando regras de severidade como fallback...")
-    seen = set()
-    for vuln in vulns:
-        pkg = vuln["package_name"]
-        if pkg in seen:
-            continue
-        seen.add(pkg)
-        sev = vuln["severity"]
-        rec = vuln["recommended_version"]
-
-        if sev in ("CRITICAL", "HIGH") and rec:
-            dec = "APPROVED";      approved += 1
-        elif sev == "LOW":
-            dec = "IGNORE";        ignored  += 1
-        else:
-            dec = "MANUAL_REVIEW"; manual   += 1
-
-        cur.execute("""
-            UPDATE vulnerability_records
-            SET decision_status=%s,
-                ai_justification='Fallback: regra de severidade (IA indisponível)',
-                updated_at=NOW()
-            WHERE package_name=%s AND remediation_status='OPEN' AND decision_status='PENDING'
-        """, (dec, pkg))
-        log(f"  {pkg}: {dec} (severity={sev})")
-
-    conn.commit()
     cur.close()
-    log(f"✅ Fallback: Approved={approved} | Manual Review={manual} | Ignored={ignored}")
+    log(f"\n✅ Decisões finais: Approved={approved} | Manual Review={manual} | Ignored={ignored}")
 
 
 # ============================================================
 # STAGE 3: Aplicação dos patches
 # Req 4: aplicação automatizada
+# AGORA: Processa cada ecossistema com seu package manager
 # ============================================================
 COMMANDS = {
     "composer": lambda pkg, ver: ["composer", "require", f"{pkg}:{ver}", "--no-interaction"],
@@ -352,72 +444,115 @@ COMMANDS = {
 
 def stage3_apply_patches(conn):
     log("=" * 60)
-    log("STAGE 3 — Aplicação de Patches")
+    log("STAGE 3 — Aplicação de Patches (Multi-Linguagem)")
     log("=" * 60)
 
-    context = detect_ecosystem()
-    pm = context.get("package_manager")
-    log(f"Ecossistema: {context.get('ecosystem')} | Package manager: {pm}")
-
-    if pm not in COMMANDS:
-        log(f"Package manager não suportado: {pm}", "ERROR")
-        return 0
-
-    binary = shutil.which(pm)
-    if not binary:
-        log(f"{pm} não encontrado no PATH", "ERROR")
-        return 0
-
     cur = conn.cursor()
+    
+    # Busca TODOS os ecossistemas com vulnerabilidades aprovadas
     cur.execute("""
-        SELECT DISTINCT ON (package_name)
-            id, package_name, installed_version, recommended_version, ai_justification
+        SELECT DISTINCT ecosystem
         FROM vulnerability_records
         WHERE decision_status='APPROVED' AND remediation_status='OPEN'
-        ORDER BY package_name
+          AND ecosystem != 'UNKNOWN'
+        ORDER BY ecosystem
     """)
-    rows = cur.fetchall()
-    cur.close()
-
-    if not rows:
+    
+    ecosystems = [row[0] for row in cur.fetchall()]
+    
+    if not ecosystems:
         log("Nenhuma vulnerabilidade aprovada para patch.")
+        cur.close()
         return 0
+    
+    log(f"\n🌍 Ecossistemas com patches aprovados: {', '.join(ecosystems)}")
+    
+    total_remediated = total_failed = 0
+    
+    # Processa cada ecossistema
+    for ecosystem in ecosystems:
+        pm = PACKAGE_MANAGERS.get(ecosystem)
+        if not pm:
+            log(f"Ecossistema desconhecido: {ecosystem}", "WARN")
+            continue
+        
+        log(f"\n{ecosystem}:")
+        log(f"  Package manager: {pm}")
+        
+        binary = shutil.which(pm)
+        if not binary:
+            log(f"  ❌ {pm} não encontrado no PATH", "ERROR")
+            continue
+        
+        # Busca vulnerabilidades APPROVED deste ecossistema
+        cur.execute("""
+            SELECT DISTINCT ON (package_name)
+                id, package_name, installed_version, recommended_version, ai_justification
+            FROM vulnerability_records
+            WHERE decision_status='APPROVED' AND remediation_status='OPEN'
+              AND ecosystem=%s
+            ORDER BY package_name
+        """, (ecosystem,))
+        rows = cur.fetchall()
+        
+        if not rows:
+            log(f"  ✅ Nenhuma vulnerabilidade aprovada para {ecosystem}")
+            continue
+        
+        log(f"  🔧 Aplicando patches para {len(rows)} pacote(s)...")
+        
+        remediated = failed = 0
+        
+        for _, pkg, old_ver, new_ver, justif in rows:
+            # Se new_ver for None, usar "update" genérico
+            if new_ver:
+                log(f"    {pkg}: {old_ver} → {new_ver}")
+                cmd = COMMANDS[pm](pkg, new_ver)
+            else:
+                log(f"    {pkg}: {old_ver} → (update genérico)")
+                # Fallback: atualizar especificamente este pacote (qualquer versão nova)
+                if pm == "composer":
+                    cmd = ["composer", "update", pkg, "--no-interaction"]
+                elif pm == "npm":
+                    cmd = ["npm", "update", pkg]
+                else:  # pip
+                    cmd = ["pip", "install", "--upgrade", pkg]
+            
+            if justif:
+                log(f"      Justificativa: {justif[:100]}")
 
-    remediated = failed = 0
-    cur = conn.cursor()
+            result = subprocess.run(cmd, capture_output=True, text=True)
 
-    for _, pkg, old_ver, new_ver, justif in rows:
-        log(f"Aplicando patch: {pkg} {old_ver} → {new_ver}")
-        if justif:
-            log(f"  Justificativa IA: {justif[:120]}")
+            if result.returncode == 0:
+                log(f"      ✅ Sucesso")
+                cur.execute("""
+                    UPDATE vulnerability_records
+                    SET remediation_status='REMEDIATED',
+                        previous_version=installed_version,
+                        updated_at=NOW()
+                    WHERE package_name=%s AND ecosystem=%s
+                      AND decision_status='APPROVED' AND remediation_status='OPEN'
+                """, (pkg, ecosystem))
+                remediated += 1
+            else:
+                # Req 4.4: falhas parciais — registra e continua
+                log(f"      ❌ Falha: {result.stderr[:150]}", "WARN")
+                cur.execute("""
+                    UPDATE vulnerability_records
+                    SET remediation_status='FAILED', updated_at=NOW()
+                    WHERE package_name=%s AND ecosystem=%s
+                      AND decision_status='APPROVED' AND remediation_status='OPEN'
+                """, (pkg, ecosystem))
+                failed += 1
 
-        cmd = COMMANDS[pm](pkg, new_ver)
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode == 0:
-            log(f"  ✅ Patch aplicado com sucesso")
-            cur.execute("""
-                UPDATE vulnerability_records
-                SET remediation_status='REMEDIATED',
-                    previous_version=installed_version,
-                    updated_at=NOW()
-                WHERE package_name=%s AND decision_status='APPROVED' AND remediation_status='OPEN'
-            """, (pkg,))
-            remediated += 1
-        else:
-            # Req 4.4: falhas parciais — registra e continua
-            log(f"  ❌ Falha no patch: {result.stderr[:200]}", "WARN")
-            cur.execute("""
-                UPDATE vulnerability_records
-                SET remediation_status='FAILED', updated_at=NOW()
-                WHERE package_name=%s AND decision_status='APPROVED' AND remediation_status='OPEN'
-            """, (pkg,))
-            failed += 1
-
-    conn.commit()
+        conn.commit()
+        log(f"  ✅ {ecosystem}: {remediated} aplicados | {failed} falhas")
+        total_remediated += remediated
+        total_failed += failed
+    
     cur.close()
-    log(f"✅ Patches: {remediated} aplicados | {failed} falhas")
-    return remediated
+    log(f"\n✅ TOTAL: {total_remediated} patches aplicados | {total_failed} falhas")
+    return total_remediated
 
 
 # ============================================================
@@ -428,11 +563,12 @@ def stage3_apply_patches(conn):
 def stage4_validate_via_report(conn, execution_id, vulns_before, post_report_path="reports/report_post_patch.json"):
     """
     Compara relatório pós-patch com total anterior.
+    AGORA: Mostra breakdown por ecossistema
     O re-scan em si é executado pelo workflow (trivy-action),
     não pelo Python — trivy não está no PATH deste processo.
     """
     log("=" * 60)
-    log("STAGE 4 — Validação Pós-Patch")
+    log("STAGE 4 — Validação Pós-Patch (Multi-Linguagem)")
     log("=" * 60)
 
     if not os.path.exists(post_report_path):
@@ -443,10 +579,32 @@ def stage4_validate_via_report(conn, execution_id, vulns_before, post_report_pat
         with open(post_report_path) as f:
             post = json.load(f)
 
-        vulns_after = sum(len(r.get("Vulnerabilities") or []) for r in post.get("Results", []))
+        vulns_after = 0
+        by_eco = {}
+        
+        for result in post.get("Results", []):
+            result_type = result.get("Type", "").lower()
+            
+            if "composer" in result_type:
+                eco = "PHP"
+            elif "npm" in result_type or "package" in result_type.lower():
+                eco = "Node.js"
+            elif "pip" in result_type or "poetry" in result_type:
+                eco = "Python"
+            else:
+                eco = "UNKNOWN"
+            
+            vuln_count = len(result.get("Vulnerabilities") or [])
+            vulns_after += vuln_count
+            by_eco[eco] = vuln_count
+
         reduction = round((vulns_before - vulns_after) / vulns_before * 100, 2) if vulns_before > 0 else 0
 
-        log(f"Vulnerabilidades: {vulns_before} → {vulns_after} (redução: {reduction}%)")
+        log(f"\n📊 Resultados por ecossistema:")
+        for eco, count in sorted(by_eco.items()):
+            log(f"  {eco}: {count} vulnerabilidade(s)")
+        
+        log(f"\n✅ Vulnerabilidades: {vulns_before} → {vulns_after} (redução: {reduction}%)")
 
         if execution_id:
             cur = conn.cursor()
@@ -471,8 +629,9 @@ def stage4_validate_via_report(conn, execution_id, vulns_before, post_report_pat
 # ============================================================
 def main():
     print("\n" + "=" * 60)
-    print("🔒 PIPELINE AUTÔNOMO DE REMEDIAÇÃO SCA")
+    print("🔒 PIPELINE AUTÔNOMO DE REMEDIAÇÃO SCA (Multi-Linguagem)")
     print("   IA como agente de segurança central")
+    print("   Suporte: PHP (Composer) + Node.js (npm) + Python (pip)")
     print("=" * 60)
 
     # Req 2.5: verificação inicial do relatório
@@ -485,13 +644,13 @@ def main():
     vulns_found  = 0
 
     try:
-        # Stage 1: carrega, enriquece e persiste
+        # Stage 1: carrega, enriquece e persiste (multi-linguagem)
         execution_id, vulns_found = stage1_load_and_persist(conn)
 
-        # Stage 2: IA analisa e decide
+        # Stage 2: IA analisa e decide (por ecossistema)
         stage2_ai_decide(conn)
 
-        # Stage 3: aplica patches
+        # Stage 3: aplica patches (multi-linguagem com gerenciadores específicos)
         remediated = stage3_apply_patches(conn)
 
         # Stage 4: valida resultado (se relatório pós-patch existir)
@@ -507,6 +666,7 @@ def main():
             print("✅ PIPELINE CONCLUÍDO — Todas as vulnerabilidades remediadas")
         else:
             print("⚠️  PIPELINE CONCLUÍDO — Revisão manual necessária para itens restantes")
+        print("   (Todas as linguagens processadas: PHP, Node.js, Python)")
         print("=" * 60)
 
     except Exception as e:

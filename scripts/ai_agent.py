@@ -2,6 +2,7 @@
 Agente de IA - Cérebro do Framework de Remediação
 Requisito 3: Análise orientada por IA via OpenRouter/Gemini
 Requisito 10: Retry com backoff exponencial até 5 tentativas
+Requisito 4: Escolher VERSÃO MÍNIMA MITIGADA (same-major strategy)
 """
 import os
 import json
@@ -43,13 +44,56 @@ def _call_with_retry(client, prompt):
             time.sleep(delay)
 
 
+def get_curated_versions(package_name, ecosystem):
+    """
+    Consulta banco de dados curado (homologated_versions) para versões aprovadas.
+    Retorna lista de versões seguras aprovadas, ordenada.
+    
+    Req 4: IA deve consultar banco curado para validar versão mínima mitigada.
+    """
+    try:
+        from db import connect_db
+        conn = connect_db()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT safe_version, approved_by, notes, approved_at
+            FROM homologated_versions
+            WHERE package_name = %s AND ecosystem = %s
+            ORDER BY approved_at DESC
+        """, (package_name, ecosystem))
+        
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        if rows:
+            return [
+                {
+                    "version": r[0],
+                    "approved_by": r[1],
+                    "notes": r[2],
+                    "approved_at": str(r[3]) if r[3] else None
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        print(f"    ⚠️  Erro ao consultar homologated_versions: {e}")
+    
+    return []
+
+
 def analisar_pacote(package_name, installed_version, severity, cves,
                      fixed_versions, ecosystem, recommended_version=None):
     """
     Req 3: IA consulta OSV e decide estratégia de remediação para um pacote.
+    Req 4: Escolhe VERSÃO MÍNIMA MITIGADA consultando banco curado.
     Consolida múltiplas CVEs do mesmo pacote em uma única decisão (Req 3.5).
     """
     client = get_client()
+    
+    # Req 4: Consulta versões aprovadas no banco curado
+    curated_versions = get_curated_versions(package_name, ecosystem)
 
     context = {
         "package": package_name,
@@ -57,26 +101,29 @@ def analisar_pacote(package_name, installed_version, severity, cves,
         "installed_version": installed_version,
         "highest_severity": severity,
         "cves_affected": cves,
-        "fixed_versions_available": fixed_versions,
-        "recommended_version_from_curated_db": recommended_version,
-        "project_type": "legacy PHP - minimize breaking changes, same-major preferred"
+        "fixed_versions_available": fixed_versions if isinstance(fixed_versions, list) else [fixed_versions] if fixed_versions else [],
+        "recommended_version_from_osv": recommended_version,
+        "curated_approved_versions": [v["version"] for v in curated_versions],
+        "project_type": "legacy - minimize breaking changes, same-major preferred"
     }
 
-    prompt = f"""You are an autonomous DevSecOps security agent for legacy PHP projects.
+    prompt = f"""You are an autonomous DevSecOps security agent for legacy projects.
 
 Analyze this vulnerability and decide the best remediation strategy.
+IMPORTANT: Choose the MINIMUM VERSION that fixes all CVEs (same-major strategy).
 
 Context:
 {json.dumps(context, indent=2)}
 
 Decision rules:
-- CRITICAL/HIGH severity: APPROVE if a safe version exists
-- Prefer same-major version (e.g., 6.3.0 → 6.5.8, not 7.x) to avoid breaking legacy code
-- If recommended_version_from_curated_db is set, validate and prefer it
-- MEDIUM: APPROVE only if update risk is LOW
-- LOW: IGNORE (not worth the risk)
-- If NO safe remediation exists: MANUAL_REVIEW (Req 3.6)
-- Consolidate all CVEs of the same package into ONE version update (Req 3.5)
+1. CRITICAL/HIGH severity with safe version → APPROVE (minimum safe version)
+2. Prefer same-major version to avoid breaking changes (e.g., 6.3.0 → 6.5.8, NOT 7.x)
+3. If curated_approved_versions exist, prefer one of them
+4. If recommended_version_from_osv exists and is same-major, validate it
+5. MEDIUM: APPROVE only if update risk is LOW and version is well-tested
+6. LOW: IGNORE (not worth the risk)
+7. If NO safe remediation exists: MANUAL_REVIEW
+8. Consolidate all CVEs of same package into ONE version update
 
 Respond ONLY in valid JSON, no markdown:
 {{
@@ -84,7 +131,7 @@ Respond ONLY in valid JSON, no markdown:
   "recommended_version": "6.5.8",
   "risk_level": "LOW",
   "strategy": "same-major patch update",
-  "justification": "Version 6.5.8 fixes all 5 HIGH CVEs (CVE-2022-29248, etc.) with no breaking changes in the 6.x series. Safe for legacy PHP projects."
+  "justification": "Version 6.5.8 fixes CVEs CVE-2022-29248, etc. No breaking changes in 6.x series. Suitable for legacy projects."
 }}"""
 
     try:
@@ -105,13 +152,19 @@ Respond ONLY in valid JSON, no markdown:
     except Exception as e:
         print(f"    ⚠️  Erro na IA: {e}. Usando fallback.")
 
-    # Fallback por severidade
+    # Fallback: prefere curated se existir, caso contrário usa OSV
+    safe_ver = None
+    if curated_versions:
+        safe_ver = curated_versions[0]["version"]  # Já ordenada por approved_at DESC
+    elif recommended_version:
+        safe_ver = recommended_version
+    
     return {
-        "approved": severity in ("CRITICAL", "HIGH") and bool(recommended_version),
-        "recommended_version": recommended_version,
+        "approved": severity in ("CRITICAL", "HIGH") and bool(safe_ver),
+        "recommended_version": safe_ver,
         "risk_level": "MEDIUM",
-        "strategy": "fallback-rule-based",
-        "justification": f"IA indisponível. Fallback: severity={severity}, versão recomendada={recommended_version}"
+        "strategy": "fallback: curated or osv",
+        "justification": f"Fallback: severity={severity}, curated={bool(curated_versions)}, version={safe_ver}"
     }
 
 
