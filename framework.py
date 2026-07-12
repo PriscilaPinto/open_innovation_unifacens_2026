@@ -96,18 +96,6 @@ def db_finish_execution(conn, execution_id, status, found, resolved):
     log(f"Execução finalizada: {status} | {resolved}/{found} ({pct}%) resolvidas")
 
 
-def db_save_pr(conn, execution_id, pr_number, pr_url):
-    """Req 12.5: salva referência ao PR."""
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO pull_requests (execution_id, pr_number, pr_url, approval_status)
-        VALUES (%s, %s, %s, 'PENDING')
-        ON CONFLICT DO NOTHING
-    """, (execution_id, pr_number, pr_url))
-    conn.commit()
-    cur.close()
-
-
 # ============================================================
 # STAGE 1: Leitura do relatório Trivy + OSV + Supabase
 # Req 1, 2, 3.2, 12
@@ -148,7 +136,14 @@ def query_curated(cursor, package_name, ecosystem="PHP"):
 
 
 def stage1_load_and_persist(conn, report_path="reports/report.json"):
-    """Req 1, 2, 12: lê relatório, enriquece com OSV/curado e persiste."""
+    """
+    Req 1, 2, 12: lê relatório, enriquece com OSV/curado e persiste.
+    
+    Agora utiliza persist_history.py para:
+    - Req 3: Consulta OSV API com fallback
+    - Req 12: Rastreamento de source_db (CURATED_DB vs OSV_API)
+    - Req 5: Evita duplicação de registros
+    """
     log("=" * 60)
     log("STAGE 1 — Leitura do Trivy Report + Persistência Supabase")
     log("=" * 60)
@@ -160,10 +155,8 @@ def stage1_load_and_persist(conn, report_path="reports/report.json"):
 
     run_id = os.getenv("GITHUB_RUN_ID", f"local-{int(time.time())}")
     repo   = os.getenv("GITHUB_REPOSITORY", "local")
-    context = detect_ecosystem()
-    osv_eco = context.get("osv_ecosystem", "Packagist")
-    curated_eco = context.get("curated_ecosystem", "PHP")
 
+    # Cria execução
     execution_id = db_safe(db_create_execution, conn, repo, run_id)
     if execution_id:
         log(f"Execução criada no Supabase: {execution_id}")
@@ -182,46 +175,74 @@ def stage1_load_and_persist(conn, report_path="reports/report.json"):
         sys.exit(0)
 
     log(f"Vulnerabilidades detectadas: {total_vulns}")
+    
+    # Importa persist_history para consulta OSV e persistência
+    try:
+        from persist_history import query_vulnerability_data
+        use_persist_history = True
+    except ImportError:
+        log("persist_history.py não disponível, usando fallback", "WARN")
+        use_persist_history = False
+    
+    context = detect_ecosystem()
+    ecosystem = context.get("curated_ecosystem", "PHP")
+    
     cur = conn.cursor()
     count = 0
 
     for result in all_results:
         for vuln in (result.get("Vulnerabilities") or []):
-            count += 1
-            pkg     = vuln.get("PkgName")
+            cve_id = vuln.get("VulnerabilityID")
+            pkg = vuln.get("PkgName")
             version = vuln.get("InstalledVersion")
-            sev     = vuln.get("Severity", "UNKNOWN")
-
-            # Banco curado primeiro, depois OSV
-            vdata = query_curated(cur, pkg, curated_eco)
-            source = ""
-            if vdata:
-                source = vdata["source"]
-            else:
-                vdata = query_osv(pkg, version, osv_eco)
+            sev = vuln.get("Severity", "UNKNOWN")
+            fixed_ver = vuln.get("FixedVersion")
+            
+            # Req 5: Verificar duplicação ANTES de inserir
+            cur.execute("""
+                SELECT id FROM vulnerability_records
+                WHERE execution_id = %s
+                  AND cve_id = %s
+                  AND package_name = %s
+                  AND installed_version = %s
+            """, (execution_id, cve_id, pkg, version))
+            
+            if cur.fetchone():
+                log(f"  [DUPLICADO] {cve_id} em {pkg}:{version} — ignorando")
+                continue
+            
+            count += 1
+            
+            # Consulta dados via persist_history (OSV + curado)
+            vdata = None
+            source = "NONE"
+            osv_ref = None
+            rec_ver = None
+            
+            if use_persist_history:
+                vdata = query_vulnerability_data(cur, pkg, version, ecosystem)
                 if vdata:
-                    source = "OSV_API"
-
-            log(f"  {pkg} {version} [{sev}] → {vdata.get('recommended_version') if vdata else 'N/A'} ({source})")
+                    source = vdata.get("source", "UNKNOWN")
+                    osv_ref = vdata.get("osv_id")
+                    rec_ver = vdata.get("recommended_version")
+            
+            log(f"  {pkg} {version} [{sev}] → {rec_ver or 'N/A'} ({source})")
 
             try:
                 cur.execute("""
                     INSERT INTO vulnerability_records
                         (execution_id, cve_id, package_name, severity,
                          installed_version, fixed_version, remediation_status,
-                         osv_reference, recommended_version)
-                    VALUES (%s,%s,%s,%s,%s,%s,'OPEN',%s,%s)
+                         osv_reference, recommended_version, source_db)
+                    VALUES (%s,%s,%s,%s,%s,%s,'OPEN',%s,%s,%s)
                 """, (
-                    execution_id,
-                    vuln.get("VulnerabilityID"),
-                    pkg, sev, version,
-                    vuln.get("FixedVersion"),
-                    vdata.get("osv_id") if vdata else None,
-                    vdata.get("recommended_version") if vdata else None,
+                    execution_id, cve_id, pkg, sev, version, fixed_ver,
+                    osv_ref, rec_ver, source
                 ))
             except Exception as e:
                 log(f"DB insert error para {pkg}: {e}", "WARN")
                 conn.rollback()
+                continue
 
     if execution_id:
         try:
@@ -229,9 +250,10 @@ def stage1_load_and_persist(conn, report_path="reports/report.json"):
                         (count, execution_id))
         except Exception:
             pass
+    
     conn.commit()
     cur.close()
-    log(f"✅ {count} vulnerabilidades salvas no Supabase")
+    log(f"✅ {count} vulnerabilidades salvas no Supabase (sem duplicatas)")
     return execution_id, count
 
 
