@@ -376,7 +376,8 @@ def stage2_ai_decide(conn):
                     sev = vuln["severity"]
                     rec = vuln["recommended_version"]
 
-                    if sev in ("CRITICAL", "HIGH") and rec:
+                    # HIGH/CRITICAL sempre aprova (composer update faz o resto)
+                    if sev in ("CRITICAL", "HIGH"):
                         dec = "APPROVED";      approved += 1
                     elif sev == "LOW":
                         dec = "IGNORE";        ignored  += 1
@@ -405,7 +406,8 @@ def stage2_ai_decide(conn):
                 sev = vuln["severity"]
                 rec = vuln["recommended_version"]
 
-                if sev in ("CRITICAL", "HIGH") and rec:
+                # HIGH/CRITICAL sempre aprova (composer update faz o resto)
+                if sev in ("CRITICAL", "HIGH"):
                     dec = "APPROVED";      approved += 1
                 elif sev == "LOW":
                     dec = "IGNORE";        ignored  += 1
@@ -502,11 +504,23 @@ def stage3_apply_patches(conn):
         remediated = failed = 0
         
         for _, pkg, old_ver, new_ver, justif in rows:
-            log(f"    {pkg}: {old_ver} → {new_ver}")
+            # Se new_ver for None, usar "update" genérico
+            if new_ver:
+                log(f"    {pkg}: {old_ver} → {new_ver}")
+                cmd = COMMANDS[pm](pkg, new_ver)
+            else:
+                log(f"    {pkg}: {old_ver} → (update genérico)")
+                # Fallback: atualizar especificamente este pacote (qualquer versão nova)
+                if pm == "composer":
+                    cmd = ["composer", "update", pkg, "--no-interaction"]
+                elif pm == "npm":
+                    cmd = ["npm", "update", pkg]
+                else:  # pip
+                    cmd = ["pip", "install", "--upgrade", pkg]
+            
             if justif:
                 log(f"      Justificativa: {justif[:100]}")
 
-            cmd = COMMANDS[pm](pkg, new_ver)
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode == 0:
