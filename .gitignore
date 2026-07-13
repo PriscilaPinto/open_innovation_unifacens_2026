@@ -209,8 +209,15 @@ tempCodeRunnerFile.py
 __pycache__/
 *.pyc
 
+# Requirements Document (não versionado para evitar conflitos)
+REQUIREMENTS.md
+
+# Composer vendor directory
+vendor/
+composer.lock
+
 # Trivy report (gerado pelo pipeline, não versionado)
-reports/report.json
+reports/
  
 # Ruff stuff:
 .ruff_cache/

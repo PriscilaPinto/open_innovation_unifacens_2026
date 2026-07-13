@@ -213,14 +213,11 @@ Retorne SOMENTE o código puro do patch.
     print("\n🗄️ [FASE 5] Persistindo auditoria...")
 
     try:
-
-        conexao = psycopg2.connect(
-            host=os.environ.get("DB_HOST", "localhost"),
-            database=os.environ.get("DB_NAME", "postgres"),
-            user=os.environ.get("DB_USER", "postgres"),
-            password=os.environ.get("DB_PASSWORD", "sua_senha_aqui"),
-            port=os.environ.get("DB_PORT", "5432")
-        )
+        # Usa db.py para conectar (consistente com o resto do framework)
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from db import connect_db
+        conexao = connect_db()
 
         cursor = conexao.cursor()
 

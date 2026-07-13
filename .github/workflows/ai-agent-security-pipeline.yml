@@ -171,49 +171,57 @@ jobs:
           echo "✅ Smoke tests concluídos"
 
       # ============================================================
-      # CRÍTICO: Preservar alterações dos patches
+      # CRÍTICO: Branch fix/remediation baseada em origin/develop
       # 
-      # FLUXO CORRETO (corrigido):
-      #   1. Cria/reseta fix/remediation a partir do estado ATUAL
-      #      (develop + patches do composer/npm/pip)
-      #   2. Commit + push com as correções
-      #   3. Só então reseta develop para origin/develop (imutável)
+      # FLUXO CORRETO:
+      #   1. Stash: salva as alterações do working tree
+      #   2. fix/remediation criada a partir de ORIGIN/DEVELOP
+      #      (garante que a base é develop remoto, não HEAD local)
+      #   3. Stash pop: aplica APENAS os patches em cima de origin/develop
+      #   4. Commit + push: apenas o diff dos patches vai para fix/remediation
+      #   5. PR: fix/remediation → homolog (NUNCA develop)
       #
-      # ANTIGO (bug): reset develop destruía os patches ANTES de commitar
+      # ANTIGO (bug): git checkout -B fix/remediation (sem origin/develop)
+      #   fazia a branch apontar para o HEAD local = develop, resultando
+      #   em PR para develop em vez de homolog
       # ============================================================
-      - name: Aplicar correções na branch fix/remediation
+      - name: Criar branch fix/remediation com patches
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Cria/reseta fix/remediation a partir do HEAD atual
-          # (develop com patches de composer require já aplicados)
-          git checkout -B fix/remediation
+          # 1. Stash: salva alterações do working tree (composer.json, etc.)
+          git stash 2>/dev/null || true
 
-          # Adiciona apenas arquivos de dependências modificados
-          # EXCLUI reports/ (gerado pelo Trivy, não versionado)
+          # 2. Cria fix/remediation a partir de ORIGIN/DEVELOP (NÃO do HEAD local)
+          git checkout -B fix/remediation origin/develop
+
+          # 3. Pop: aplica os patches salvos
+          git stash pop 2>/dev/null || true
+
+          # 4. Adiciona APENAS arquivos de dependências modificados
           for f in composer.json composer.lock package.json package-lock.json requirements.txt; do
             if [ -f "$f" ]; then
-              git add "$f"
-              echo "Adicionado: $f"
+              git add "$f" 2>/dev/null || true
+              echo "   Adicionado: $f"
             fi
           done
 
-          # Verifica se há mudanças staged
+          # 5. Se houver mudanças, commit + push
           if git diff --cached --quiet; then
             echo "HAS_CHANGES=false" >> $GITHUB_ENV
-            echo "Nenhuma alteração detectada — sem vulnerabilidades para corrigir."
+            echo "📭 Nenhuma alteração — sem vulnerabilidades para corrigir."
           else
             git status --short
             git commit -m "fix: remediação automática via agente de IA (run #${{ github.run_id }})"
             git push origin fix/remediation --force
             echo "HAS_CHANGES=true" >> $GITHUB_ENV
-            echo "✅ Branch fix/remediation atualizada automaticamente com as correções"
+            echo "✅ Branch fix/remediation contém APENAS os patches (base: origin/develop)"
           fi
 
-      - name: Garantir develop imutável
+      - name: Reset develop para origin/develop (imutável)
         if: env.HAS_CHANGES == 'true'
         run: |
           git checkout develop
