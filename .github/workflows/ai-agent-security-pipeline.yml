@@ -70,17 +70,11 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Instalar PHP, Node.js e dependências
+      - name: Instalar PHP + Composer
         run: |
-          # PHP + Composer
           sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
           curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
           composer --version
-          
-          # Node.js + npm
-          sudo apt-get install -y nodejs npm --quiet
-          node --version
-          npm --version
 
       - name: Instalar dependências Python
         run: pip install -r requirements.txt --quiet
@@ -198,10 +192,11 @@ jobs:
           # (develop com patches de composer require já aplicados)
           git checkout -B fix/remediation
 
-          # Adiciona todos os arquivos de dependências modificados
+          # Adiciona apenas arquivos de dependências modificados
+          # EXCLUI reports/ (gerado pelo Trivy, não versionado)
           for f in composer.json composer.lock package.json package-lock.json requirements.txt; do
             if [ -f "$f" ]; then
-              git add -f "$f"
+              git add "$f"
               echo "Adicionado: $f"
             fi
           done
@@ -236,13 +231,16 @@ jobs:
             echo "Branch homolog criada"
           fi
 
-      # PR aguardando aprovação: fix/remediation → homolog
+      # PR: fix/remediation → homolog
+      # Nota: em alguns repositórios o GITHUB_TOKEN não pode criar PRs.
+      # Se falhar, crie manualmente com:
+      #   gh pr create --base homolog --head fix/remediation --title "Remediação automática"
       - name: Criar PR para aprovação (fix/remediation → homolog)
         if: env.HAS_CHANGES == 'true'
+        continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Verifica se já existe PR aberta
           EXISTING_PR=$(gh pr list \
             --head fix/remediation \
             --base homolog \
@@ -255,7 +253,7 @@ jobs:
             exit 0
           fi
           
-          # Cria nova PR aguardando aprovação
+          echo "⏳ Criando PR: fix/remediation → homolog..."
           gh pr create \
             --base homolog \
             --head fix/remediation \
@@ -264,23 +262,12 @@ jobs:
 
           **Fluxo:** develop (automático) → fix/remediation (automático) → **homolog** ⏳ (aguarda aprovação)
           
-          Esta PR contém as correções aplicadas automaticamente pela pipeline.
+          As correções estão na branch fix/remediation.
+          Crie a PR manualmente se esta etapa falhar.
           
-          **Próximos passos:**
-          1. Revisar mudanças (dependências atualizadas)
-          2. Testar em homolog
-          3. Aprovar para merge
-          4. Security-gate valida antes de merge
-          
-          Run: #${{ github.run_id }}
-          
-          ---
-          
-          **Estratégia de Versioning:** same-major (compatibilidade legado)
-          **Rollback:** versões anteriores armazenadas em Supabase" \
-            --draft
-          
-          echo "✅ PR criada: fix/remediation → homolog (aguardando aprovação)"
+          Run: #${{ github.run_id }}" \
+          && echo "✅ PR criada com sucesso" \
+          || echo "⚠️  PR automática indisponível. Crie manualmente: gh pr create --base homolog --head fix/remediation --title 'Remediação automática'"
 
       - name: Info - Pipeline Completa
         if: env.HAS_CHANGES == 'true'
