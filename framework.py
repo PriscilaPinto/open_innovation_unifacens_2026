@@ -19,7 +19,6 @@ import json
 import time
 import subprocess
 import shutil
-import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -106,42 +105,12 @@ def db_finish_execution(conn, execution_id, status, found, resolved):
 # ============================================================
 # STAGE 1: Leitura do relatório Trivy + OSV + Supabase
 # Req 1, 2, 3.2, 12
+# 
+# NOTA: As consultas OSV e banco curado são delegadas ao
+#       persist_history.py para consistência. As funções
+#       query_osv() e query_curated() que existiam aqui
+#       como dead code foram removidas.
 # ============================================================
-def query_osv(package_name, version, ecosystem="Packagist"):
-    """Req 3.2: consulta OSV Database."""
-    try:
-        resp = requests.post(
-            "https://api.osv.dev/v1/query",
-            json={"package": {"name": package_name, "ecosystem": ecosystem}, "version": version},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            vulns = resp.json().get("vulns", [])
-            if vulns:
-                osv_id = vulns[0].get("id")
-                for affected in vulns[0].get("affected", []):
-                    for rng in affected.get("ranges", []):
-                        for event in rng.get("events", []):
-                            if "fixed" in event:
-                                return {"osv_id": osv_id, "recommended_version": event["fixed"]}
-    except Exception as e:
-        log(f"OSV API error para {package_name}: {e}", "WARN")
-    return None
-
-
-def query_curated(cursor, package_name, ecosystem="PHP"):
-    cursor.execute("""
-        SELECT safe_version, approved_by
-        FROM homologated_versions
-        WHERE package_name=%s AND ecosystem=%s
-        ORDER BY approved_at DESC LIMIT 1
-    """, (package_name, ecosystem))
-    row = cursor.fetchone()
-    if row:
-        return {"recommended_version": row[0], "source": f"CURATED_DB (by {row[1]})"}
-    return None
-
-
 def stage1_load_and_persist(conn, report_path="reports/report.json"):
     """
     Req 1, 2, 12: lê relatório, enriquece com OSV/curado e persiste.

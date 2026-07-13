@@ -153,29 +153,53 @@ def query_vulnerability_data(cur, package_name, installed_version, ecosystem):
     Consulta dados de vulnerabilidade.
     Prioridade: banco curado > OSV API
     
-    Req 3.3: Banco curado tem prioridade
-    Req 3.4: Fallback para OSV API
+    Req 3.3: Banco curado tem prioridade (versão recomendada)
+    Req 3.4: OSV API consultada MESMO quando curado existir, 
+             para enriquecer com osv_id e rastreabilidade
+    Req 12:  Salva osv_reference e source_db no banco
+    
+    Fluxo corrigido:
+      1. Consulta banco curado primeiro (versão segura aprovada)
+      2. Se curado existe, consulta OSV para obter osv_id e dados adicionais
+      3. Se curado não existe, usa OSV como fallback completo
+      4. Se nenhum disponível, retorna None
     
     Retorna:
         {
             "recommended_version": "6.5.8",
-            "osv_id": "GHSA-xxxx",  ou None se curado
-            "source": "CURATED_DB" ou "OSV_API",
+            "osv_id": "GHSA-xxxx" ou None,
+            "source": "CURATED_DB" ou "OSV_API" ou "CURATED_DB_ENRICHED",
             "all_fixed_versions": [...],
             ...
         }
     """
-    # Tenta banco curado primeiro
+    # 1. Tenta banco curado primeiro
     curated = query_curated_db(cur, package_name, ecosystem)
+    
     if curated:
-        print(f"      [CURATED_DB] {package_name}")
+        print(f"      [CURATED_DB] {package_name} → {curated.get('recommended_version')}")
+        
+        # 2. Enriquecer com OSV para obter osv_id mesmo quando curado
+        print(f"      [Enriquecendo com OSV API] {package_name} {installed_version}")
+        osv_data = query_osv_api(package_name, installed_version, ecosystem)
+        
+        if osv_data:
+            # Mescla: mantém versão do banco curado, mas adiciona osv_id do OSV
+            curated["osv_id"] = osv_data.get("osv_id")
+            curated["all_fixed_versions"] = osv_data.get("all_fixed_versions", [])
+            curated["fixed_versions"] = osv_data.get("fixed_versions", [])
+            curated["source"] = "CURATED_DB"  # Fonte principal ainda é curado
+            print(f"      ✓ OSV enriquecido: {curated.get('osv_id')}")
+        else:
+            print(f"      ⚠️  OSV não retornou dados extras (apenas curado)")
+        
         return curated
     
-    # Fallback: OSV API
+    # 3. Fallback: OSV API (curado não encontrou)
     print(f"      [Consultando OSV API] {package_name} {installed_version}")
     osv_data = query_osv_api(package_name, installed_version, ecosystem)
     if osv_data:
-        print(f"      [OSV_API] {package_name} → {osv_data.get('recommended_version')}")
+        print(f"      [OSV_API] {package_name} → {osv_data.get('recommended_version')} ({osv_data.get('osv_id')})")
         return osv_data
     
     print(f"      ❌ Nenhuma versão recomendada encontrada")

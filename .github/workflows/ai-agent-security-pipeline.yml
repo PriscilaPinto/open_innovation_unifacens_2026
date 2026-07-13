@@ -176,18 +176,35 @@ jobs:
           fi
           echo "✅ Smoke tests concluídos"
 
-      # LIMPEZA CRÍTICA: Reverter alterações em develop antes de criar fix/remediation
-      # Isso garante que develop PERMANECE IMUTÁVEL
+      # ============================================================
+      # CRÍTICO: Preservar alterações dos patches ANTES de resetar develop
+      # 
+      # FLUXO CORRETO:
+      #   1. Stash: salva as alterações feitas por composer/npm/pip
+      #   2. Reset develop: garante que develop permanece imutável
+      #   3. Criar fix/remediation: a partir de develop limpa
+      #   4. Pop stash: aplica as correções na branch fix/remediation
+      #   5. Commit + push: envia as correções para o branch
+      # ============================================================
+      - name: Salvar alterações dos patches (stash)
+        run: |
+          if git diff --quiet; then
+            echo "HAS_STASH=false" >> $GITHUB_ENV
+            echo "📭 Nenhuma alteração detectada para stash"
+          else
+            git stash save --include-untracked "patches-$(date +%s)"
+            echo "HAS_STASH=true" >> $GITHUB_ENV
+            echo "📦 Alterações dos patches salvas em stash"
+          fi
+
       - name: Garantir develop imutável
         run: |
           git checkout develop
           git reset --hard origin/develop
           echo "✅ develop resetada para origin/develop (imutável)"
 
-      # Branch intermediária com nome FIXO: fix/remediation
-      # Cria a partir de develop (agora limpa)
-      # AUTOMÁTICO - sem PR, sem aprovação necessária
-      - name: Atualizar branch fix/remediation automaticamente
+      - name: Aplicar correções na branch fix/remediation
+        if: env.HAS_STASH == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -197,7 +214,10 @@ jobs:
           # Cria ou reseta fix/remediation a partir de develop limpa
           git checkout -B fix/remediation origin/develop
 
-          # Força git a ver as mudanças do sistema de arquivos (composer require modifica esses arquivos)
+          # Aplica as alterações salvas (composer.json, composer.lock, etc.)
+          git stash pop
+
+          # Força git a ver as mudanças do sistema de arquivos
           git update-index --refresh 2>/dev/null || true
 
           # Adiciona todos os arquivos de dependências modificados
