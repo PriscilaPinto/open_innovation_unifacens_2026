@@ -1,41 +1,51 @@
 """
 Agente de IA - Cérebro do Framework de Remediação
-Requisito 3: Análise orientada por IA via OpenRouter/Gemini
+Requisito 3: Análise orientada por IA via Google Gemini (gratuito)
 Requisito 10: Retry com backoff exponencial até 5 tentativas
 Requisito 4: Escolher VERSÃO MÍNIMA MITIGADA (same-major strategy)
+
+NOTA: Usa Google Generative AI direto (sem OpenRouter).
+      Chave gratuita em: https://aistudio.google.com/apikey
+      Modelo: gemini-2.5-flash (gratuito, 60 req/min)
 """
 import os
 import json
 import time
-from openai import OpenAI
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL = os.getenv("AI_MODEL", "google/gemini-2.5-flash")
+MODEL = os.getenv("AI_MODEL", "gemini-2.5-flash")
 MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "600"))
 TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.1"))
 MAX_RETRIES = 5
 
 
 def get_client():
-    api_key = os.getenv("OPEN_ROUTER_API")
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPEN_ROUTER_API não configurada.")
-    return OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+        raise RuntimeError(
+            "GEMINI_API_KEY não configurada.\n"
+            "Obtenha sua chave gratuita em: https://aistudio.google.com/apikey"
+        )
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        MODEL,
+        generation_config=genai.GenerationConfig(
+            max_output_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
+        )
+    )
+    return model
 
 
-def _call_with_retry(client, prompt):
+def _call_with_retry(model, prompt):
     """Req 10: retry com backoff exponencial até 5 tentativas."""
     for attempt in range(MAX_RETRIES):
         try:
-            response = client.chat.completions.create(
-                model=MODEL,
-                max_tokens=MAX_TOKENS,
-                temperature=TEMPERATURE,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.choices[0].message.content or ""
+            response = model.generate_content(prompt)
+            return response.text or ""
         except Exception as e:
             if attempt == MAX_RETRIES - 1:
                 raise

@@ -136,9 +136,9 @@ jobs:
           DB_SSLMODE: require
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
-          OPEN_ROUTER_API: ${{ secrets.OPEN_ROUTER_API }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MIN_SEVERITY: HIGH
-          AI_MODEL: google/gemini-2.5-flash
+          AI_MODEL: gemini-2.5-flash
           AI_TEMPERATURE: "0.1"
           AI_MAX_TOKENS: "600"
         run: python framework.py
