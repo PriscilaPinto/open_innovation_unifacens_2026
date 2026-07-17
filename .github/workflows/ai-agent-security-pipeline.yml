@@ -73,9 +73,9 @@ jobs:
       - name: Instalar dependências Python
         run: pip install -r requirements.txt --quiet
 
-      - name: Instalar PHP + Composer (se detectado no Trivy)
+      - name: Instalar PHP + Composer (se composer detectado no Trivy)
         run: |
-          if python -c "
+          python <<'EOF'
 import json
 with open('reports/report.json') as f:
     report = json.load(f)
@@ -83,7 +83,17 @@ for r in report.get('Results', []):
     if 'composer' in r.get('Type', '').lower():
         print('composer')
         break
-" 2>/dev/null | grep -q composer; then
+EOF
+          if [ "$(python <<'EOF'
+import json
+with open('reports/report.json') as f:
+    report = json.load(f)
+for r in report.get('Results', []):
+    if 'composer' in r.get('Type', '').lower():
+        print('YES')
+        break
+EOF
+)" = "YES" ]; then
             echo "📦 PHP/Composer detectado no Trivy — instalando..."
             sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
             curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
