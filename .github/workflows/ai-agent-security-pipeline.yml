@@ -73,34 +73,13 @@ jobs:
       - name: Instalar dependências Python
         run: pip install -r requirements.txt --quiet
 
-      - name: Instalar PHP + Composer (se composer detectado no Trivy)
+      - name: Instalar PHP + Composer (se composer.json existir)
+        if: hashFiles('composer.json') != ''
         run: |
-          python <<'EOF'
-import json
-with open('reports/report.json') as f:
-    report = json.load(f)
-for r in report.get('Results', []):
-    if 'composer' in r.get('Type', '').lower():
-        print('composer')
-        break
-EOF
-          if [ "$(python <<'EOF'
-import json
-with open('reports/report.json') as f:
-    report = json.load(f)
-for r in report.get('Results', []):
-    if 'composer' in r.get('Type', '').lower():
-        print('YES')
-        break
-EOF
-)" = "YES" ]; then
-            echo "📦 PHP/Composer detectado no Trivy — instalando..."
-            sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
-            curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-            composer --version
-          else
-            echo "⏭️ PHP/Composer não detectado — pulando instalação"
-          fi
+          echo "📦 composer.json detectado — instalando PHP + Composer..."
+          sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
+          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+          composer --version
 
       - name: Aplicar schema e migrations no Supabase
         env:
