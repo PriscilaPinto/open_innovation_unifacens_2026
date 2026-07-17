@@ -70,14 +70,27 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Instalar PHP + Composer
-        run: |
-          sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
-          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-          composer --version
-
       - name: Instalar dependências Python
         run: pip install -r requirements.txt --quiet
+
+      - name: Instalar PHP + Composer (se detectado no Trivy)
+        run: |
+          if python -c "
+import json
+with open('reports/report.json') as f:
+    report = json.load(f)
+for r in report.get('Results', []):
+    if 'composer' in r.get('Type', '').lower():
+        print('composer')
+        break
+" 2>/dev/null | grep -q composer; then
+            echo "📦 PHP/Composer detectado no Trivy — instalando..."
+            sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
+            curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+            composer --version
+          else
+            echo "⏭️ PHP/Composer não detectado — pulando instalação"
+          fi
 
       - name: Aplicar schema e migrations no Supabase
         env:
@@ -147,29 +160,6 @@ jobs:
       # (não repetir aqui — trivy não está instalado neste job)
       # Responsabilidade: job security-scan instala trivy, não este job
 
-      # Smoke test multilinguagem (Req 8)
-      - name: Smoke test (validação de estabilidade)
-        run: |
-          # PHP
-          if [ -f "composer.json" ] && command -v php &> /dev/null; then
-            echo "--- PHP smoke test ---"
-            for f in index.php; do
-              [ -f "$f" ] && php -l "$f" && echo "✅ $f: OK"
-            done
-            composer install --no-interaction --no-progress --prefer-dist 2>&1 | tail -3
-          fi
-          # Node.js
-          if [ -f "package.json" ] && command -v node &> /dev/null; then
-            echo "--- Node.js smoke test ---"
-            node --version && npm install --dry-run 2>&1 | tail -3
-          fi
-          # Python
-          if [ -f "requirements.txt" ] && command -v python &> /dev/null; then
-            echo "--- Python smoke test ---"
-            python -c "import pkg_resources; pkg_resources.require(open('requirements.txt').readlines())" 2>&1 | tail -3
-          fi
-          echo "✅ Smoke tests concluídos"
-
       # ============================================================
       # CRÍTICO: Branch fix/remediation baseada em origin/develop
       # 
@@ -228,58 +218,10 @@ jobs:
           git reset --hard origin/develop
           echo "✅ develop resetada para origin/develop (imutável)"
 
-      # Garante que homolog existe
-      - name: Garantir branch homolog
-        if: env.HAS_CHANGES == 'true'
-        run: |
-          git fetch origin
-          if ! git ls-remote --heads origin homolog | grep -q homolog; then
-            git checkout -b homolog origin/develop
-            git push origin homolog
-            echo "Branch homolog criada"
-          fi
-
-      # PR: fix/remediation → homolog
-      # Nota: em alguns repositórios o GITHUB_TOKEN não pode criar PRs.
-      # Se falhar, crie manualmente com:
-      #   gh pr create --base homolog --head fix/remediation --title "Remediação automática"
-      - name: Criar PR para aprovação (fix/remediation → homolog)
-        if: env.HAS_CHANGES == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          EXISTING_PR=$(gh pr list \
-            --head fix/remediation \
-            --base homolog \
-            --state open \
-            --json number \
-            --jq '.[0].number' 2>/dev/null || echo "")
-          
-          if [ -n "$EXISTING_PR" ]; then
-            echo "✅ PR já existe: #$EXISTING_PR"
-            exit 0
-          fi
-          
-          echo "⏳ Criando PR: fix/remediation → homolog..."
-          gh pr create \
-            --base homolog \
-            --head fix/remediation \
-            --title "🧪 Deploy em Homolog: remediação automática" \
-            --body "Remediação automática de vulnerabilidades via agente de IA
-
-          **Fluxo:** develop (automático) → fix/remediation (automático) → **homolog** ⏳ (aguarda aprovação)
-          
-          As correções estão na branch fix/remediation.
-          Crie a PR manualmente se esta etapa falhar.
-          
-          Run: #${{ github.run_id }}" \
-          && echo "✅ PR criada com sucesso" \
-          || echo "⚠️  PR automática indisponível. Crie manualmente: gh pr create --base homolog --head fix/remediation --title 'Remediação automática'"
-
       - name: Info - Pipeline Completa
         if: env.HAS_CHANGES == 'true'
         run: |
           echo "✅ Correções aplicadas automaticamente em fix/remediation"
-          echo "📋 PR criada para homolog (aguardando aprovação manual)"
           echo "🔒 develop permanece imutável"
+          echo "📋 Para finalizar, faça o merge de fix/remediation → homolog"
+          echo "   A segunda pipeline (homolog-security-gate) validará o código"

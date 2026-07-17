@@ -66,3 +66,24 @@ END $$;
 -- Comentário explicativo
 COMMENT ON COLUMN vulnerability_records.ecosystem IS 
   'Ecossistema: PHP (Packagist), Node.js (npm), Python (PyPI), UNKNOWN';
+
+-- ============================================================
+-- Migration 4: Adicionar coluna homolog_status para o security gate
+-- A pipeline 1 (ai-agent-security) define status (SUCCESS/FAILED)
+-- A pipeline 2 (homolog-security-gate) define homolog_status
+-- Isso evita conflito: uma execução tem dois momentos de validação
+-- ============================================================
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'pipeline_executions'
+          AND column_name = 'homolog_status'
+    ) THEN
+        ALTER TABLE pipeline_executions
+        ADD COLUMN homolog_status TEXT DEFAULT 'PENDING';  -- PENDING | VALIDATED | REJECTED
+    END IF;
+END $$;
+
+COMMENT ON COLUMN pipeline_executions.homolog_status IS 
+  'Status da validação em homolog: PENDING (aguardando), VALIDATED (aprovado), REJECTED (reprovado)';
