@@ -135,14 +135,9 @@ Decision rules:
 7. If NO safe remediation exists: MANUAL_REVIEW
 8. Consolidate all CVEs of same package into ONE version update
 
-Respond ONLY in valid JSON, no markdown:
-{{
-  "approved": true,
-  "recommended_version": "6.5.8",
-  "risk_level": "LOW",
-  "strategy": "same-major patch update",
-  "justification": "Version 6.5.8 fixes CVEs CVE-2022-29248, etc. No breaking changes in 6.x series. Suitable for legacy projects."
-}}"""
+Respond ONLY with a valid JSON object, no markdown, no code fences.
+Use this exact structure (values are examples only, replace with real data):
+{"approved": true, "recommended_version": "MINIMUM_SAFE_VERSION", "risk_level": "LOW_or_MEDIUM_or_HIGH", "strategy": "same-major_or_newer_or_virtual_patch", "justification": "Brief explanation why this version was chosen"}"""
 
     try:
         content = _call_with_retry(client, prompt)
@@ -151,16 +146,28 @@ Respond ONLY in valid JSON, no markdown:
         content = content.strip()
         if content.startswith("```"):
             lines = content.split("\n")
-            content = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
+            if len(lines) > 2 and lines[-1].strip() == "```":
+                content = "\n".join(lines[1:-1])
+            else:
+                content = "\n".join(lines[1:])
         content = content.strip()
 
-        result = json.loads(content)
-        return result
-
-    except json.JSONDecodeError as e:
-        print(f"    ⚠️  JSON inválido da IA: {e}. Usando fallback.")
-    except Exception as e:
-        print(f"    ⚠️  Erro na IA: {e}. Usando fallback.")
+        # Tenta parse direto
+        try:
+            result = json.loads(content)
+            return result
+        except json.JSONDecodeError:
+            # Fallback: extrai JSON via regex (lida com strings quebradas)
+            import re
+            match = re.search(r'\{.*?"approved"\s*:\s*(true|false).*?\}', content, re.DOTALL)
+            if match:
+                raw = match.group(0)
+                raw = raw.replace('\n', ' ').replace('\r', ' ')
+                # Remove aspas escapadas incorretamente
+                raw = raw.replace('\\"', "'")
+                result = json.loads(raw)
+                return result
+            raise
 
     # Fallback: prefere curated se existir, caso contrário usa OSV
     safe_ver = None
