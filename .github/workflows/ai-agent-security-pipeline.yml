@@ -43,13 +43,15 @@ jobs:
           name: trivy-report-${{ github.run_id }}
           path: reports/report.json
 
-  # ============================================================
-  # JOB 2: Agente de IA processa vulnerabilidades, aplica
-  #         correções e mergeia em fix-remediation → homolog
-  #
-  # develop NÃO é alterado.
-  # Branch intermediária: fix-remediation (nome fixo, sobrescrita a cada run)
-  # ============================================================
+# ============================================================
+# JOB 2: Agente de IA processa vulnerabilidades, aplica
+#         correções e publica em fix/remediation
+#
+# develop NÃO é alterado.
+# Branch intermediária: fix/remediation
+#
+# O push nessa branch dispara a Pipeline 2
+# ============================================================
   remediation:
     name: 🤖 Agente IA - Remediação (develop → fix/remediation)
     needs: security-scan
@@ -162,77 +164,68 @@ jobs:
       # Responsabilidade: job security-scan instala trivy, não este job
 
       # ============================================================
+      # ============================================================
       # CRÍTICO: Branch fix/remediation baseada em origin/develop
-      # 
-      # FLUXO CORRETO:
-      #   1. Stash: salva as alterações do working tree
-      #   2. fix/remediation criada a partir de ORIGIN/DEVELOP
-      #      (garante que a base é develop remoto, não HEAD local)
-      #   3. Stash pop: aplica APENAS os patches em cima de origin/develop
-      #   4. Commit + push: apenas o diff dos patches vai para fix/remediation
-      #   5. PR: fix/remediation → homolog (NUNCA develop)
       #
-      # ANTIGO (bug): git checkout -B fix/remediation (sem origin/develop)
-      #   fazia a branch apontar para o HEAD local = develop, resultando
-      #   em PR para develop em vez de homolog
+      # FLUXO CORRETO:
+      #   1. Stage das alterações geradas pelo agente
+      #   2. Commit temporário dos patches
+      #   3. fix/remediation criada a partir de ORIGIN/DEVELOP
+      #   4. Cherry-pick somente das correções geradas
+      #   5. Push para fix/remediation
+      #
+      # A Pipeline 2 será disparada pelo push nessa branch
+      # e será responsável pela validação e promoção para homolog
+      # ============================================================
+      # ============================================================
+      # ============================================================
+      # CRÍTICO: Branch fix/remediation baseada em origin/develop
+      #
+      # FLUXO CORRETO:
+      #   1. Stage das alterações geradas pelo agente
+      #   2. Commit temporário dos patches
+      #   3. fix/remediation criada a partir de ORIGIN/DEVELOP
+      #      (garante que a base é develop remoto)
+      #   4. Cherry-pick somente das correções geradas
+      #   5. Push para fix/remediation
+      #
+      # A Pipeline 2 será disparada pelo push nessa branch
+      # e será responsável pela validação e promoção para homolog
       # ============================================================
       - name: Criar branch fix/remediation com patches
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 1. Stash: salva alterações do working tree (composer.json, etc.)
-          git stash 2>/dev/null || true
+          echo "📦 Salvando alterações geradas pelo agente"
 
-          # 2. Cria fix/remediation a partir de ORIGIN/DEVELOP (NÃO do HEAD local)
-          git checkout -B fix/remediation origin/develop
+          git add -A
 
-          # 3. Pop: aplica os patches salvos
-          git stash pop 2>/dev/null || true
-
-          # 4. Adiciona APENAS arquivos de dependências modificados
-          for f in composer.json composer.lock package.json package-lock.json requirements.txt; do
-            if [ -f "$f" ]; then
-              git add "$f" 2>/dev/null || true
-              echo "   Adicionado: $f"
-            fi
-          done
-
-          # 5. Se houver mudanças, commit + push
           if git diff --cached --quiet; then
             echo "HAS_CHANGES=false" >> $GITHUB_ENV
-            echo "📭 Nenhuma alteração — sem vulnerabilidades para corrigir."
-          else
-            git status --short
-            git commit -m "fix: remediação automática via agente de IA (run #${{ github.run_id }})"
-            git push origin fix/remediation --force
-            echo "HAS_CHANGES=true" >> $GITHUB_ENV
-            echo "✅ Branch fix/remediation contém APENAS os patches (base: origin/develop)"
-          fi
-
-      - name: Criar Pull Request fix/remediation → homolog
-        if: env.HAS_CHANGES == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-
-          EXISTING=$(gh pr list \
-            --head fix/remediation \
-            --base homolog \
-            --state open \
-            --json number \
-            --jq '.[0].number')
-
-          if [ -n "$EXISTING" ]; then
-            echo "PR já existe (#$EXISTING)"
+            echo "📭 Nenhuma alteração gerada pelo agente"
             exit 0
           fi
 
-          gh pr create \
-            --head fix/remediation \
-            --base homolog \
-            --title "🤖 Remediação automática via IA" \
-            --body "
+          git commit -m "fix: remediação automática via agente IA"
 
+          PATCH_COMMIT=$(git rev-parse HEAD)
+
+          echo "🌱 Criando branch fix/remediation baseada em origin/develop"
+
+          git checkout -B fix/remediation origin/develop
+
+          echo "♻️ Aplicando somente o commit de correção"
+
+          git cherry-pick $PATCH_COMMIT
+
+          echo "🚀 Enviando correções para fix/remediation"
+
+          git push origin fix/remediation --force
+
+          echo "HAS_CHANGES=true" >> $GITHUB_ENV
+
+          echo "✅ Correções publicadas em fix/remediation"
+          
