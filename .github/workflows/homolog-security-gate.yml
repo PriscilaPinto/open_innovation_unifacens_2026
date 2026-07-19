@@ -1,24 +1,25 @@
 name: DevSecOps - Security Gate (Homolog)
 
 # Dispara quando:
-#   1. Push em homolog (após merge manual de fix/remediation → homolog)
-#   2. workflow_dispatch: execução manual
+#   1. Push em fix/remediation (após aprovação do PR develop → fix/remediation)
+#   2. workflow_dispatch
 on:
   push:
-    branches: [homolog]
+    branches: [fix/remediation]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 jobs:
   security-gate:
-    name: 🧪 Re-scan e Validação em Homolog
+    name: 🧪 Re-scan e Validação da Remediação
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: homolog
+          ref: fix/remediation
 
       # ============================================================
       # FASE 1: Re-scan Trivy — garante que NENHUMA vulnerabilidade
@@ -131,3 +132,39 @@ jobs:
 
           conn.close()
           EOF
+              # ============================================================
+      - name: Instalar GitHub CLI
+        run: |
+          type -p curl >/dev/null || sudo apt install curl -y
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+
+          sudo apt update
+          sudo apt install gh -y
+      # ============================================================
+      # FASE 4: Criação automática do PR para homolog
+      # Executa somente se toda a validação foi concluída.
+      # ============================================================
+      - name: Criar Pull Request para homolog
+        if: env.TRIVY_EXIT_CODE == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base homolog \
+            --head fix/remediation \
+            --title "chore: Remediação validada - Promote para homolog" \
+            --body "
+            ## Remediação validada automaticamente
+
+            - ✅ Re-scan Trivy executado
+            - ✅ Smoke Tests aprovados
+            - ✅ Atualização do Supabase concluída
+
+            A remediação foi validada automaticamente e está pronta para homologação.
+            " || echo "PR já existe."
