@@ -73,13 +73,25 @@ jobs:
       - name: Instalar dependências Python
         run: pip install -r requirements.txt --quiet
 
-      - name: Instalar PHP + Composer (se composer.json existir)
-        if: hashFiles('composer.json') != ''
+      # Lê o relatório Trivy para detectar ecossistemas (SCA puro)
+      # e instala APENAS os gerenciadores necessários para os patches
+      - name: Detectar ecossistemas no Trivy e instalar dependências
         run: |
-          echo "📦 composer.json detectado — instalando PHP + Composer..."
-          sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
-          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-          composer --version
+          if grep -q '"Type": "composer"' reports/report.json 2>/dev/null; then
+            echo "📦 PHP (composer) detectado no Trivy — instalando..."
+            sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
+            curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+            composer --version
+          fi
+          if grep -q '"Type": "npm"' reports/report.json 2>/dev/null || grep -q '"Type": "package"' reports/report.json 2>/dev/null; then
+            echo "📦 Node.js (npm) detectado no Trivy — instalando..."
+            sudo apt-get install -y nodejs npm --quiet
+            node --version
+            npm --version
+          fi
+          if grep -q '"Type": "pip"' reports/report.json 2>/dev/null || grep -q '"Type": "poetry"' reports/report.json 2>/dev/null; then
+            echo "📦 Python (pip) detectado no Trivy — já instalado com Python"
+          fi
 
       - name: Aplicar schema e migrations no Supabase
         env:

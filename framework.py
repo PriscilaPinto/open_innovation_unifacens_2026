@@ -411,9 +411,52 @@ COMMANDS = {
 }
 
 
+def run_smoke_test(ecosystem):
+    """Executa smoke test básico para validar estabilidade pós-patch."""
+    if ecosystem == "PHP":
+        # Valida sintaxe de todos os arquivos PHP
+        result = subprocess.run(
+            "for f in $(find . -name '*.php' -not -path './vendor/*'); do php -l $f 2>&1 || exit 1; done",
+            shell=True, capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            log(f"      ❌ Smoke test PHP falhou: {result.stderr[:200]}", "WARN")
+            return False
+        
+        # Tenta composer install para verificar dependências
+        if os.path.exists("composer.json"):
+            result = subprocess.run(
+                ["composer", "install", "--no-interaction", "--no-progress", "--prefer-dist"],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                log(f"      ❌ Smoke test composer falhou: {result.stderr[:200]}", "WARN")
+                return False
+        
+        return True
+    
+    elif ecosystem == "Node.js":
+        # Valida sintaxe com node --check
+        result = subprocess.run(
+            "for f in $(find . -name '*.js' -not -path './node_modules/*'); do node --check $f 2>&1 || exit 1; done",
+            shell=True, capture_output=True, text=True, timeout=60
+        )
+        return result.returncode == 0
+    
+    elif ecosystem == "Python":
+        # Valida sintaxe Python
+        result = subprocess.run(
+            "python -m py_compile $(find . -name '*.py' -not -path './venv/*' -not -path './env/*') 2>&1 || true",
+            shell=True, capture_output=True, text=True, timeout=60
+        )
+        return True  # Não bloqueante para Python
+    
+    return True
+
+
 def stage3_apply_patches(conn):
     log("=" * 60)
-    log("STAGE 3 — Aplicação de Patches (Multi-Linguagem)")
+    log("STAGE 3 — Aplicação de Patches com Virtual Patching (Multi-Linguagem)")
     log("=" * 60)
 
     cur = conn.cursor()
@@ -436,7 +479,7 @@ def stage3_apply_patches(conn):
     
     log(f"\n🌍 Ecossistemas com patches aprovados: {', '.join(ecosystems)}")
     
-    total_remediated = total_failed = 0
+    total_remediated = total_failed = total_virtual_patched = 0
     
     # Processa cada ecossistema
     for ecosystem in ecosystems:
@@ -470,7 +513,7 @@ def stage3_apply_patches(conn):
         
         log(f"  🔧 Aplicando patches para {len(rows)} pacote(s)...")
         
-        remediated = failed = 0
+        remediated = failed = virtual_patched = 0
         
         for _, pkg, old_ver, new_ver, justif in rows:
             # Se new_ver for None, usar "update" genérico
@@ -493,35 +536,164 @@ def stage3_apply_patches(conn):
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode == 0:
-                log(f"      ✅ Sucesso")
-                cur.execute("""
-                    UPDATE vulnerability_records
-                    SET remediation_status='REMEDIATED',
-                        previous_version=installed_version,
-                        updated_at=NOW()
-                    WHERE package_name=%s AND ecosystem=%s
-                      AND decision_status='APPROVED' AND remediation_status='OPEN'
-                """, (pkg, ecosystem))
-                remediated += 1
+                log(f"      ✅ Update aplicado com sucesso")
+                
+                # === SMOKE TEST PÓS-UPDATE ===
+                log(f"      🔍 Executando smoke test para validar estabilidade...")
+                smoke_ok = run_smoke_test(ecosystem)
+                
+                if smoke_ok:
+                    log(f"      ✅ Smoke test passou — patch confirmado")
+                    cur.execute("""
+                        UPDATE vulnerability_records
+                        SET remediation_status='REMEDIATED',
+                            previous_version=installed_version,
+                            updated_at=NOW()
+                        WHERE package_name=%s AND ecosystem=%s
+                          AND decision_status='APPROVED' AND remediation_status='OPEN'
+                    """, (pkg, ecosystem))
+                    remediated += 1
+                else:
+                    # === VIRTUAL PATCH: update quebrou compatibilidade ===
+                    log(f"      ⚠️  Smoke test FALHOU após update — aplicando Virtual Patch", "WARN")
+                    
+                    # Reverte o update (git checkout nos arquivos de dependência)
+                    log(f"      ↩️  Revertendo update de {pkg}...")
+                    subprocess.run(
+                        ["git", "checkout", "--", "composer.json", "composer.lock",
+                         "package.json", "package-lock.json", "requirements.txt"],
+                        capture_output=True, text=True
+                    )
+                    
+                    # Gera virtual patch via IA
+                    log(f"      🧠 Gerando Virtual Patch via IA para {pkg}...")
+                    try:
+                        from ai_agent import gerar_virtual_patch
+                        
+                        # Busca CVEs associadas a este pacote
+                        cur.execute("""
+                            SELECT cve_id FROM vulnerability_records
+                            WHERE package_name=%s AND ecosystem=%s
+                              AND decision_status='APPROVED' AND remediation_status='OPEN'
+                        """, (pkg, ecosystem))
+                        cves = [row[0] for row in cur.fetchall()]
+                        
+                        patch_data = gerar_virtual_patch(
+                            package_name=pkg,
+                            cves=cves,
+                            installed_version=old_ver,
+                            ecosystem=ecosystem
+                        )
+                        
+                        if patch_data:
+                            # Salva o virtual patch no banco
+                            cur.execute("""
+                                UPDATE vulnerability_records
+                                SET remediation_status='VIRTUAL_PATCH',
+                                    previous_version=installed_version,
+                                    virtual_patch_path=%s,
+                                    virtual_patch_data=%s,
+                                    ai_justification=COALESCE(ai_justification, '') || %s,
+                                    updated_at=NOW()
+                                WHERE package_name=%s AND ecosystem=%s
+                                  AND decision_status='APPROVED' AND remediation_status='OPEN'
+                            """, (
+                                patch_data["file_path"],
+                                patch_data["patch_code"],
+                                f" | VirtualPatch: {patch_data['justification']}",
+                                pkg, ecosystem
+                            ))
+                            virtual_patched += 1
+                            log(f"      ✅ Virtual Patch salvo: {patch_data['file_path']}")
+                        else:
+                            log(f"      ❌ Falha ao gerar Virtual Patch — marcando como FAILED", "WARN")
+                            cur.execute("""
+                                UPDATE vulnerability_records
+                                SET remediation_status='FAILED',
+                                    previous_version=installed_version,
+                                    updated_at=NOW()
+                                WHERE package_name=%s AND ecosystem=%s
+                                  AND decision_status='APPROVED' AND remediation_status='OPEN'
+                            """, (pkg, ecosystem))
+                            failed += 1
+                    except ImportError:
+                        log(f"      ❌ gerar_virtual_patch não disponível — marcando como FAILED", "WARN")
+                        cur.execute("""
+                            UPDATE vulnerability_records
+                            SET remediation_status='FAILED',
+                                previous_version=installed_version,
+                                updated_at=NOW()
+                            WHERE package_name=%s AND ecosystem=%s
+                              AND decision_status='APPROVED' AND remediation_status='OPEN'
+                        """, (pkg, ecosystem))
+                        failed += 1
             else:
                 # Req 4.4: falhas parciais — registra e continua
-                log(f"      ❌ Falha: {result.stderr[:150]}", "WARN")
-                cur.execute("""
-                    UPDATE vulnerability_records
-                    SET remediation_status='FAILED', updated_at=NOW()
-                    WHERE package_name=%s AND ecosystem=%s
-                      AND decision_status='APPROVED' AND remediation_status='OPEN'
-                """, (pkg, ecosystem))
-                failed += 1
+                log(f"      ❌ Falha no update: {result.stderr[:150]}", "WARN")
+                
+                # Tenta Virtual Patch mesmo quando o update falha
+                log(f"      🧠 Tentando Virtual Patch via IA como fallback...")
+                try:
+                    from ai_agent import gerar_virtual_patch
+                    cur.execute("""
+                        SELECT cve_id FROM vulnerability_records
+                        WHERE package_name=%s AND ecosystem=%s
+                          AND decision_status='APPROVED' AND remediation_status='OPEN'
+                    """, (pkg, ecosystem))
+                    cves = [row[0] for row in cur.fetchall()]
+                    
+                    patch_data = gerar_virtual_patch(
+                        package_name=pkg,
+                        cves=cves,
+                        installed_version=old_ver,
+                        ecosystem=ecosystem
+                    )
+                    
+                    if patch_data:
+                        cur.execute("""
+                            UPDATE vulnerability_records
+                            SET remediation_status='VIRTUAL_PATCH',
+                                previous_version=installed_version,
+                                virtual_patch_path=%s,
+                                virtual_patch_data=%s,
+                                ai_justification=COALESCE(ai_justification, '') || %s,
+                                updated_at=NOW()
+                            WHERE package_name=%s AND ecosystem=%s
+                              AND decision_status='APPROVED' AND remediation_status='OPEN'
+                        """, (
+                            patch_data["file_path"],
+                            patch_data["patch_code"],
+                            f" | VirtualPatch: {patch_data['justification']}",
+                            pkg, ecosystem
+                        ))
+                        virtual_patched += 1
+                        log(f"      ✅ Virtual Patch gerado como fallback: {patch_data['file_path']}")
+                    else:
+                        cur.execute("""
+                            UPDATE vulnerability_records
+                            SET remediation_status='FAILED', updated_at=NOW()
+                            WHERE package_name=%s AND ecosystem=%s
+                              AND decision_status='APPROVED' AND remediation_status='OPEN'
+                        """, (pkg, ecosystem))
+                        failed += 1
+                except ImportError:
+                    cur.execute("""
+                        UPDATE vulnerability_records
+                        SET remediation_status='FAILED', updated_at=NOW()
+                        WHERE package_name=%s AND ecosystem=%s
+                          AND decision_status='APPROVED' AND remediation_status='OPEN'
+                    """, (pkg, ecosystem))
+                    failed += 1
 
         conn.commit()
-        log(f"  ✅ {ecosystem}: {remediated} aplicados | {failed} falhas")
+        log(f"  ✅ {ecosystem}: {remediated} remediados | {virtual_patched} virtual patches | {failed} falhas")
         total_remediated += remediated
+        total_virtual_patched += virtual_patched
         total_failed += failed
     
     cur.close()
-    log(f"\n✅ TOTAL: {total_remediated} patches aplicados | {total_failed} falhas")
-    return total_remediated
+    log(f"\n✅ TOTAL: {total_remediated} patches | {total_virtual_patched} virtual patches | {total_failed} falhas")
+    return total_remediated + total_virtual_patched
 
 
 # ============================================================

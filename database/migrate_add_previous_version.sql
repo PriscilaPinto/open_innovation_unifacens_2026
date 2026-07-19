@@ -87,3 +87,41 @@ END $$;
 
 COMMENT ON COLUMN pipeline_executions.homolog_status IS 
   'Status da validação em homolog: PENDING (aguardando), VALIDATED (aprovado), REJECTED (reprovado)';
+
+-- ============================================================
+-- Migration 5: Virtual Patch — colunas para armazenar mitigação
+-- Quando o update quebra compatibilidade, a IA gera um patch
+-- virtual que mitiga a CVE sem alterar a versão da dependência
+-- ============================================================
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'vulnerability_records'
+          AND column_name = 'virtual_patch_path'
+    ) THEN
+        ALTER TABLE vulnerability_records
+        ADD COLUMN virtual_patch_path TEXT;          -- Caminho do arquivo de patch gerado
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'vulnerability_records'
+          AND column_name = 'virtual_patch_data'
+    ) THEN
+        ALTER TABLE vulnerability_records
+        ADD COLUMN virtual_patch_data TEXT;          -- Código do patch gerado pela IA
+    END IF;
+END $$;
+
+COMMENT ON COLUMN vulnerability_records.virtual_patch_path IS 
+  'Caminho do arquivo de virtual patch gerado (ex: virtual_patches/CVE-2022-29248.php)';
+COMMENT ON COLUMN vulnerability_records.virtual_patch_data IS 
+  'Código de mitigação gerado pela IA quando o update quebra compatibilidade';
+
+-- Atualiza o comment do remediation_status para incluir VIRTUAL_PATCH
+COMMENT ON COLUMN vulnerability_records.remediation_status IS 
+  'OPEN | REMEDIATED | FAILED | ROLLED_BACK | VIRTUAL_PATCH';
