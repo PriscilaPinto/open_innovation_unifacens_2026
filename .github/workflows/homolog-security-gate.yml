@@ -1,170 +1,516 @@
 name: DevSecOps - Security Gate (Homolog)
 
-# Dispara quando:
-#   1. Push em fix/remediation (após aprovação do PR develop → fix/remediation)
-#   2. workflow_dispatch
+# ============================================================
+# DISPAROS
+#
+# 1. Push em fix/remediation
+#    Executa quando a branch de remediação recebe um novo commit.
+#
+# 2. workflow_dispatch
+#    Permite execução manual pelo GitHub Actions.
+#
+# A Pipeline 1 também poderá disparar este workflow
+# explicitamente após concluir o push da correção para
+# fix/remediation.
+# ============================================================
 on:
   push:
-    branches: [fix/remediation]
+    branches:
+      - fix/remediation
+
   workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   security-gate:
+
     name: 🧪 Re-scan e Validação da Remediação
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: fix/remediation
 
       # ============================================================
-      # FASE 1: Re-scan Trivy — garante que NENHUMA vulnerabilidade
-      #         CRITICAL ou HIGH persiste após o merge
-      # exit-code 1 → bloqueia o pipeline se encontrar vulns
+      # CHECKOUT
+      #
+      # A Pipeline 2 valida a branch onde a Pipeline 1 publicou
+      # as correções.
+      #
+      # Fluxo:
+      #
+      # develop
+      #     ↓
+      # Pipeline 1
+      #     ↓
+      # fix/remediation
+      #     ↓
+      # Pipeline 2
+      #
+      # Portanto, o Trivy será executado sobre a versão corrigida.
+      # ============================================================
+      - name: Checkout da branch fix/remediation
+        uses: actions/checkout@v4
+        with:
+          ref: fix/remediation
+          fetch-depth: 0
+
+
+      # ============================================================
+      # FASE 1: INSTALAÇÃO DO TRIVY
       # ============================================================
       - name: Instalar Trivy
         run: |
           sudo apt-get install -y wget gnupg lsb-release --quiet
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | sudo apt-key add -
+
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
             | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update -qq && sudo apt-get install -y trivy
 
-      - name: Re-scan Trivy (exit-code 1 bloqueia se vulnerável)
+          sudo apt-get update -qq
+
+          sudo apt-get install -y trivy
+
+          trivy --version
+
+
+      # ============================================================
+      # FASE 1: RE-SCAN TRIVY
+      #
+      # O pipeline continua mesmo se o Trivy encontrar
+      # vulnerabilidades para permitir o registro do resultado
+      # no Supabase.
+      #
+      # CRITICAL/HIGH encontrada:
+      #   exit-code 1
+      #
+      # Nenhuma CRITICAL/HIGH:
+      #   exit-code 0
+      # ============================================================
+      - name: Re-scan Trivy
         id: trivy
         continue-on-error: true
         run: |
-          trivy fs . --format table --severity CRITICAL,HIGH --exit-code 1
-          echo "✅ Nenhuma vulnerabilidade CRITICAL/HIGH encontrada em homolog"
-        shell: bash
+          echo "=============================================="
+          echo "🔍 INICIANDO RE-SCAN DE SEGURANÇA"
+          echo "=============================================="
 
+          echo "📌 Branch analisada: fix/remediation"
+
+          trivy fs . \
+            --format table \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            --skip-version-check
+
+
+      # ============================================================
+      # CAPTURA DO RESULTADO DO TRIVY
+      #
+      # steps.trivy.outcome:
+      #
+      # success → nenhuma CRITICAL/HIGH encontrada
+      # failure → vulnerabilidade encontrada
+      #
+      # O valor é salvo no GITHUB_ENV para uso nos próximos steps.
+      # ============================================================
       - name: Capturar resultado do Trivy
         if: always()
         run: |
-          echo "TRIVY_EXIT_CODE=${{ steps.trivy.outcome == 'success' && '0' || '1' }}" >> $GITHUB_ENV
+
+          if [ "${{ steps.trivy.outcome }}" = "success" ]; then
+
+            echo "TRIVY_EXIT_CODE=0" >> "$GITHUB_ENV"
+            echo "TRIVY_STATUS=PASSED" >> "$GITHUB_ENV"
+
+            echo "=============================================="
+            echo "✅ SECURITY GATE TRIVY APROVADO"
+            echo "=============================================="
+            echo "Nenhuma vulnerabilidade CRITICAL/HIGH encontrada."
+
+          else
+
+            echo "TRIVY_EXIT_CODE=1" >> "$GITHUB_ENV"
+            echo "TRIVY_STATUS=FAILED" >> "$GITHUB_ENV"
+
+            echo "=============================================="
+            echo "❌ SECURITY GATE TRIVY REPROVADO"
+            echo "=============================================="
+            echo "Vulnerabilidades CRITICAL/HIGH permanecem."
+
+          fi
+
 
       # ============================================================
-      # FASE 2: Smoke test — valida estabilidade básica
-      # Só instala o necessário com base no que existe no repositório
+      # FASE 2: SMOKE TEST PHP
+      #
+      # Executado quando o projeto contém:
+      #
+      # composer.json
+      # ou
+      # index.php
+      #
+      # Instala apenas o necessário para validar o projeto PHP.
       # ============================================================
-      - name: Smoke test PHP (se existir)
+      - name: Smoke test PHP
         if: hashFiles('composer.json') != '' || hashFiles('index.php') != ''
         run: |
-          # Só instala PHP se houver arquivos PHP
+
+          echo "=============================================="
+          echo "🧪 SMOKE TEST PHP"
+          echo "=============================================="
+
           if [ -f "index.php" ] || [ -f "composer.json" ]; then
+
+            echo "📦 Projeto PHP detectado"
+
+            echo "📦 Instalando PHP..."
+
             sudo apt-get install -y php-cli --quiet
-            curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-            composer install --no-interaction --no-progress --prefer-dist 2>&1 | tail -5
+
+            echo "📦 Instalando Composer..."
+
+            curl -sS https://getcomposer.org/installer \
+              | php -- \
+                --install-dir=/usr/local/bin \
+                --filename=composer
+
+            composer --version
+
+            echo "📦 Instalando dependências..."
+
+            composer install \
+              --no-interaction \
+              --no-progress \
+              --prefer-dist
+
           fi
-          # Valida sintaxe dos arquivos PHP
-          for f in *.php; do
-            [ -f "$f" ] && php -l "$f" && echo "✅ $f: sintaxe OK"
-          done
 
-      - name: Smoke test básico (validação de arquivos)
+          echo "🔎 Validando sintaxe dos arquivos PHP..."
+
+          find . \
+            -type f \
+            -name "*.php" \
+            -not -path "./vendor/*" \
+            -not -path "./.git/*" \
+            -print0 \
+            | while IFS= read -r -d '' file; do
+
+                php -l "$file"
+
+                echo "✅ $file: sintaxe OK"
+
+              done
+
+
+      # ============================================================
+      # FASE 2: SMOKE TEST BÁSICO
+      #
+      # Valida se a estrutura do projeto continua íntegra.
+      # ============================================================
+      - name: Smoke test básico
         run: |
+
+          echo "=============================================="
+          echo "🧪 SMOKE TEST BÁSICO"
+          echo "=============================================="
+
+          TOTAL_FILES=$(find . \
+            -type f \
+            -not -path './.git/*' \
+            -not -path './vendor/*' \
+            -not -path './__pycache__/*' \
+            | wc -l)
+
           echo "✅ Estrutura do projeto íntegra"
-          echo "   Total de arquivos: $(find . -type f -not -path './.git/*' -not -path './vendor/*' -not -path './__pycache__/*' | wc -l)"
+          echo "📁 Total de arquivos: $TOTAL_FILES"
+
 
       # ============================================================
-      # FASE 3: Atualização do Supabase
+      # FASE 3: ATUALIZAÇÃO DO SUPABASE
+      #
+      # Registra o resultado da validação da remediação.
+      #
+      # O SQL utiliza uma subconsulta para selecionar a execução
+      # mais recente.
+      #
+      # Isso evita o uso inválido de:
+      #
+      # UPDATE ...
+      # ORDER BY ...
+      # LIMIT 1
+      #
+      # diretamente no PostgreSQL.
       # ============================================================
-      - name: Registrar no Supabase
+      - name: Registrar resultado no Supabase
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DB_SSLMODE: require
         run: |
-          pip install psycopg2-binary python-dotenv --quiet
+
+          pip install \
+            psycopg2-binary \
+            python-dotenv \
+            --quiet
+
           python - <<'EOF'
-          import sys, os
+
+          import sys
+          import os
+
           sys.path.insert(0, "scripts")
+
           from db import connect_db
+
+          print("==============================================")
+          print("🔌 CONECTANDO AO SUPABASE")
+          print("==============================================")
 
           conn = connect_db()
           cur = conn.cursor()
 
-          trivy_exit = os.environ.get('TRIVY_EXIT_CODE', '1')
+          trivy_exit = os.environ.get(
+              "TRIVY_EXIT_CODE",
+              "1"
+          )
 
-          if trivy_exit == '0':
-              # Sucesso: homolog validado
+          print(
+              f"📊 Resultado do Trivy: {trivy_exit}"
+          )
+
+
+          # ========================================================
+          # CASO 1: TRIVY APROVADO
+          # ========================================================
+
+          if trivy_exit == "0":
+
+              print(
+                  "✅ Nenhuma vulnerabilidade CRITICAL/HIGH encontrada"
+              )
+
               cur.execute("""
                   UPDATE pipeline_executions
-                  SET homolog_status = 'VALIDATED', finished_at = NOW()
-                  WHERE status IN ('SUCCESS', 'PARTIAL')
-                  ORDER BY started_at DESC
-                  LIMIT 1
+                  SET
+                      homolog_status = 'VALIDATED',
+                      finished_at = NOW()
+                  WHERE id = (
+                      SELECT id
+                      FROM pipeline_executions
+                      WHERE status IN ('SUCCESS', 'PARTIAL')
+                      ORDER BY started_at DESC
+                      LIMIT 1
+                  )
               """)
+
               conn.commit()
-              print("✅ Homolog VALIDADO — nenhuma vulnerabilidade restante")
+
+              print(
+                  "✅ Homolog VALIDADO"
+              )
+
+
+          # ========================================================
+          # CASO 2: TRIVY REPROVADO
+          # ========================================================
+
           else:
-              # Falha: homolog rejeitado
+
+              print(
+                  "❌ Vulnerabilidades CRITICAL/HIGH persistem"
+              )
+
+
+              # ----------------------------------------------------
+              # Consulta versões anteriores
+              # para rastreabilidade de rollback
+              # ----------------------------------------------------
+
               cur.execute("""
-                  SELECT package_name, installed_version, previous_version
+                  SELECT
+                      package_name,
+                      installed_version,
+                      previous_version
                   FROM vulnerability_records
                   WHERE remediation_status = 'REMEDIATED'
                     AND previous_version IS NOT NULL
                   ORDER BY updated_at DESC
               """)
+
               rows = cur.fetchall()
+
+
               if rows:
-                  print("⚠️  Rollback disponível para:")
-                  for pkg, installed, prev in rows:
-                      print(f"    {pkg}: {installed} ← {prev}")
+
+                  print(
+                      "⚠️ Rollback disponível para:"
+                  )
+
+                  for pkg, installed, previous in rows:
+
+                      print(
+                          f"    {pkg}: "
+                          f"{installed} ← {previous}"
+                      )
+
+
+              # ----------------------------------------------------
+              # Marca a execução mais recente como REJECTED
+              # ----------------------------------------------------
 
               cur.execute("""
                   UPDATE pipeline_executions
-                  SET homolog_status = 'REJECTED', finished_at = NOW()
-                  WHERE status IN ('SUCCESS', 'PARTIAL')
-                  ORDER BY started_at DESC
-                  LIMIT 1
+                  SET
+                      homolog_status = 'REJECTED',
+                      finished_at = NOW()
+                  WHERE id = (
+                      SELECT id
+                      FROM pipeline_executions
+                      WHERE status IN ('SUCCESS', 'PARTIAL')
+                      ORDER BY started_at DESC
+                      LIMIT 1
+                  )
               """)
+
+
+              # ----------------------------------------------------
+              # Registra rollback das remediações
+              # ----------------------------------------------------
+
               cur.execute("""
                   UPDATE vulnerability_records
-                  SET remediation_status = 'ROLLED_BACK', updated_at = NOW()
+                  SET
+                      remediation_status = 'ROLLED_BACK',
+                      updated_at = NOW()
                   WHERE remediation_status = 'REMEDIATED'
               """)
+
+
               conn.commit()
-              print("❌ Homolog REJEITADO — vulnerabilidades persistem (rollback registrado)")
+
+
+              print(
+                  "❌ Homolog REJEITADO"
+              )
+
+              print(
+                  "⚠️ Vulnerabilidades persistem"
+              )
+
+              print(
+                  "📝 Rollback registrado no Supabase"
+              )
+
 
           conn.close()
+
+          print(
+              "🔒 Conexão com Supabase encerrada"
+          )
+
           EOF
-              # ============================================================
+
+
+      # ============================================================
+      # FASE 4: INSTALAÇÃO DO GITHUB CLI
+      #
+      # Necessário para criar automaticamente o Pull Request.
+      # ============================================================
       - name: Instalar GitHub CLI
         run: |
-          type -p curl >/dev/null || sudo apt install curl -y
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-            | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
 
-          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          type -p curl >/dev/null \
+            || sudo apt install curl -y
+
+          curl -fsSL \
+            https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo dd \
+              of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+
+          sudo chmod go+r \
+            /usr/share/keyrings/githubcli-archive-keyring.gpg
 
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-            | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            | sudo tee /etc/apt/sources.list.d/github-cli.list \
+            >/dev/null
 
           sudo apt update
+
           sudo apt install gh -y
+
+          gh --version
+
+
       # ============================================================
-      # FASE 4: Criação automática do PR para homolog
-      # Executa somente se toda a validação foi concluída.
+      # FASE 4: CRIAÇÃO DO PR PARA HOMOLOG
+      #
+      # SOMENTE executado quando:
+      #
+      # TRIVY_EXIT_CODE = 0
+      #
+      # ORIGEM:
+      #   fix/remediation
+      #
+      # DESTINO:
+      #   homolog
+      #
+      # Não é criada uma nova branch.
+      #
+      # O PR promove diretamente a branch que foi validada.
       # ============================================================
       - name: Criar Pull Request para homolog
         if: env.TRIVY_EXIT_CODE == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr create \
-            --base homolog \
+
+          echo "=============================================="
+          echo "🚀 REMEDIAÇÃO VALIDADA"
+          echo "=============================================="
+
+          echo "📌 Origem: fix/remediation"
+          echo "📌 Destino: homolog"
+
+          echo "🔀 Verificando Pull Request existente..."
+
+
+          # ========================================================
+          # Verifica se já existe PR aberto
+          # ========================================================
+
+          EXISTING_PR=$(gh pr list \
             --head fix/remediation \
-            --title "chore: Remediação validada - Promote para homolog" \
-            --body "
-            ## Remediação validada automaticamente
+            --base homolog \
+            --state open \
+            --json number \
+            --jq 'length')
 
-            - ✅ Re-scan Trivy executado
-            - ✅ Smoke Tests aprovados
-            - ✅ Atualização do Supabase concluída
 
-            A remediação foi validada automaticamente e está pronta para homologação.
-            " || echo "PR já existe."
+          if [ "$EXISTING_PR" -eq 0 ]; then
+
+            echo "🚀 Nenhum PR aberto encontrado."
+            echo "🚀 Criando Pull Request..."
+
+
+            gh pr create \
+              --base homolog \
+              --head fix/remediation \
+              --title "chore: Remediação validada - Promote para homolog" \
+              --body "$(cat <<'BODY'
+## 🤖 Remediação validada automaticamente
+
+A branch `fix/remediation` foi submetida ao Security Gate após a remediação automática.
+
+### Validações realizadas
+
+- ✅ Re-scan Trivy executado
+- ✅ Nenhuma vulnerabilidade CRITICAL/HIGH persistente
+- ✅ Smoke Test executado
+- ✅ Validação estrutural concluída
+- ✅ Resultado registrado no Supabase
+
