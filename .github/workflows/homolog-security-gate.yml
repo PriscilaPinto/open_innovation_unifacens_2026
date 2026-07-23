@@ -559,7 +559,6 @@ jobs:
       - name: Instalar GitHub CLI
 
         if: env.TRIVY_EXIT_CODE == '0'
-
         run: |
 
           type -p curl >/dev/null \
@@ -591,7 +590,6 @@ jobs:
 
           gh --version
 
-
       # ==========================================================
       # FASE 6: CRIAÇÃO DO PR PARA HOMOLOG
       #
@@ -610,20 +608,14 @@ jobs:
       # ==========================================================
 
       - name: Criar Pull Request para homolog
-
         if: env.TRIVY_EXIT_CODE == '0'
-
         env:
-
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
         run: |
-
           set -e
 
-
           echo "🔎 Verificando se já existe PR aberto"
-
 
           EXISTING_PR=$(gh pr list \
             --repo "${{ github.repository }}" \
@@ -633,20 +625,13 @@ jobs:
             --json number \
             --jq '.[0].number')
 
-
           if [ -n "$EXISTING_PR" ]; then
-
             echo "ℹ️ PR já existe: #$EXISTING_PR"
-
             echo "ℹ️ Nenhum novo PR será criado"
-
             exit 0
-
           fi
 
-
           echo "🚀 Criando PR fix/remediation → homolog"
-
 
           gh pr create \
             --repo "${{ github.repository }}" \
@@ -654,16 +639,24 @@ jobs:
             --head fix/remediation \
             --title "chore: remediação validada - promover para homolog" \
             --body "$(cat <<'EOF'
+          ## 🔒 Remediação validada automaticamente
 
-## 🔒 Remediação validada automaticamente
+          A branch `fix/remediation` passou pelo Security Gate.
 
-A branch `fix/remediation` passou pelo Security Gate.
+          ### Validações executadas
 
-### Validações executadas
+          - ✅ Re-scan Trivy
+          - ✅ Nenhuma vulnerabilidade `CRITICAL` ou `HIGH` persistente
+          - ✅ Smoke test executado
+          - ✅ Estrutura do projeto validada
+          - ✅ Resultado registrado no Supabase
 
-- ✅ Re-scan Trivy
-- ✅ Nenhuma vulnerabilidade `CRITICAL` ou `HIGH` persistente
-- ✅ Smoke test executado
-- ✅ Estrutura do projeto validada
-- ✅ Resultado registrado no Supabase
+          ### Próxima etapa
 
+          A remediação está pronta para promoção para a branch `homolog`.
+
+          > ⚠️ O merge não é realizado automaticamente.
+          >
+          > A aprovação e o merge deste Pull Request permanecem sob responsabilidade humana, conforme as regras de proteção da branch e as políticas do repositório.
+          EOF
+          )"
