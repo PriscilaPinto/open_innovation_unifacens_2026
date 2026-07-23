@@ -2,235 +2,616 @@ name: DevSecOps - Remediação Automática
 
 on:
   push:
-    branches: [develop]
+    branches:
+      - develop
+
   workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
+  actions: write
+
 
 jobs:
+
   # ============================================================
-  # JOB 1: Scan de vulnerabilidades (develop — somente leitura)
+  # JOB 1: SCAN DE VULNERABILIDADES
+  #
+  # Executado exclusivamente sobre a branch develop.
+  #
+  # Responsabilidade:
+  #   - Executar o Trivy
+  #   - Gerar relatório JSON
+  #   - Disponibilizar o relatório para o agente de IA
+  #
+  # IMPORTANTE:
+  #   Este job NÃO altera a branch develop.
   # ============================================================
+
   security-scan:
+
     name: 🔍 Trivy SCA Scan
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # Checkout da branch develop
+      # ----------------------------------------------------------
+
+      - name: Checkout develop
+
+        uses: actions/checkout@v4
+
         with:
           ref: develop
+          fetch-depth: 0
+
+
+      # ----------------------------------------------------------
+      # Instalação do Trivy
+      # ----------------------------------------------------------
 
       - name: Instalar Trivy
+
         run: |
-          sudo apt-get install -y wget gnupg lsb-release --quiet
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+
+          sudo apt-get install -y \
+            wget \
+            gnupg \
+            lsb-release \
+            --quiet
+
+          wget -qO - \
+            https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | sudo apt-key add -
+
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
             | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update -qq && sudo apt-get install -y trivy
 
-      - name: Scan JSON (para processamento pelo agente)
+          sudo apt-get update -qq
+
+          sudo apt-get install -y trivy
+
+
+      # ----------------------------------------------------------
+      # Scan Trivy em JSON
+      #
+      # O relatório será consumido posteriormente pelo framework.
+      # ----------------------------------------------------------
+
+      - name: Scan JSON para processamento pelo agente
+
         run: |
+
           mkdir -p reports
-          trivy fs . --format json --output reports/report.json --skip-version-check
 
-      - name: Scan tabela (visualização no log)
+          trivy fs . \
+            --format json \
+            --output reports/report.json \
+            --skip-version-check
+
+
+      # ----------------------------------------------------------
+      # Scan Trivy em formato de tabela
+      #
+      # Serve para visualização no log do GitHub Actions.
+      #
+      # Não bloqueia o pipeline neste momento.
+      # A validação definitiva será feita pela Pipeline 2.
+      # ----------------------------------------------------------
+
+      - name: Scan tabela para visualização
+
         run: |
-          trivy fs . --format table --severity CRITICAL,HIGH,MEDIUM --skip-version-check || true
 
-      - uses: actions/upload-artifact@v4
+          trivy fs . \
+            --format table \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --skip-version-check \
+            || true
+
+
+      # ----------------------------------------------------------
+      # Upload do relatório para o próximo Job
+      # ----------------------------------------------------------
+
+      - name: Upload do relatório Trivy
+
+        uses: actions/upload-artifact@v4
+
         with:
           name: trivy-report-${{ github.run_id }}
           path: reports/report.json
 
+
   # ============================================================
-  # JOB 2: Agente de IA processa vulnerabilidades, aplica
-  #         correções e mergeia em fix-remediation → homolog
+  # JOB 2: REMEDIAÇÃO AUTOMÁTICA
   #
-  # develop NÃO é alterado.
-  # Branch intermediária: fix-remediation (nome fixo, sobrescrita a cada run)
+  # Fluxo:
+  #
+  # develop
+  #    ↓
+  # Trivy Report
+  #    ↓
+  # framework.py
+  #    ↓
+  # IA analisa
+  #    ↓
+  # Correções aplicadas
+  #    ↓
+  # fix/remediation
+  #
+  # A branch develop NÃO é alterada diretamente.
   # ============================================================
+
   remediation:
-    name: 🤖 Agente IA - Remediação e Merge em Homolog
-    needs: security-scan
+
+    name: 🤖 Agente IA - Remediação
+
+    needs:
+      - security-scan
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # Checkout da branch develop
+      # ----------------------------------------------------------
+
+      - name: Checkout develop
+
+        uses: actions/checkout@v4
+
         with:
           ref: develop
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+
+      # ----------------------------------------------------------
+      # Download do relatório gerado pelo Job 1
+      # ----------------------------------------------------------
+
+      - name: Download do relatório Trivy
+
+        uses: actions/download-artifact@v4
+
         with:
           name: trivy-report-${{ github.run_id }}
           path: reports/
 
-      - uses: actions/setup-python@v5
+
+      # ----------------------------------------------------------
+      # Configuração do Python
+      # ----------------------------------------------------------
+
+      - name: Configurar Python
+
+        uses: actions/setup-python@v5
+
         with:
           python-version: '3.10'
 
-      - name: Instalar PHP e Composer
-        run: |
-          sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
-          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-          composer --version
+
+      # ----------------------------------------------------------
+      # Instalação das dependências Python
+      # ----------------------------------------------------------
 
       - name: Instalar dependências Python
-        run: pip install -r requirements.txt --quiet
 
-      - name: Aplicar schema e migrations no Supabase
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DB_SSLMODE: require
         run: |
+
+          pip install \
+            -r requirements.txt \
+            --quiet
+
+
+      # ==========================================================
+      # DETECÇÃO DOS ECOSSISTEMAS
+      #
+      # Instala somente os gerenciadores necessários para que
+      # o agente possa aplicar as correções.
+      # ==========================================================
+
+      - name: Detectar ecossistemas e instalar dependências
+
+        run: |
+
+          # ------------------------------------------------------
+          # PHP / Composer
+          # ------------------------------------------------------
+
+          if grep -q '"Type": "composer"' reports/report.json 2>/dev/null; then
+
+            echo "📦 PHP (Composer) detectado no Trivy"
+
+            sudo apt-get install -y \
+              php-cli \
+              php-curl \
+              php-mbstring \
+              php-xml \
+              --quiet
+
+            curl -sS \
+              https://getcomposer.org/installer \
+              | php \
+                -- \
+                --install-dir=/usr/local/bin \
+                --filename=composer
+
+            composer --version
+
+          fi
+
+
+          # ------------------------------------------------------
+          # Node.js / npm
+          # ------------------------------------------------------
+
+          if grep -q '"Type": "npm"' reports/report.json 2>/dev/null \
+             || grep -q '"Type": "package"' reports/report.json 2>/dev/null; then
+
+            echo "📦 Node.js (npm) detectado no Trivy"
+
+            sudo apt-get install -y \
+              nodejs \
+              npm \
+              --quiet
+
+            node --version
+
+            npm --version
+
+          fi
+
+
+          # ------------------------------------------------------
+          # Python / pip / poetry
+          # ------------------------------------------------------
+
+          if grep -q '"Type": "pip"' reports/report.json 2>/dev/null \
+             || grep -q '"Type": "poetry"' reports/report.json 2>/dev/null; then
+
+            echo "📦 Python detectado no Trivy"
+
+            python --version
+
+            pip --version
+
+          fi
+
+
+      # ==========================================================
+      # BANCO DE DADOS
+      #
+      # Aplica:
+      #   - Schema
+      #   - Migrations
+      #   - Cleanup
+      #   - Seed de versões homologadas
+      #
+      # O processo é idempotente conforme os scripts SQL.
+      # ==========================================================
+
+      - name: Aplicar schema, migrations e seed no Supabase
+
+        env:
+
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+          DB_SSLMODE: require
+
+        run: |
+
           python - <<'EOF'
+
           import sys
+
           sys.path.insert(0, "scripts")
+
           from db import connect_db
 
+
           conn = connect_db()
+
           cur = conn.cursor()
 
+
+          # ------------------------------------------------------
+          # Schema principal
+          # ------------------------------------------------------
+
           with open("database/schema.sql") as f:
+
               cur.execute(f.read())
+
           conn.commit()
+
+          print("✅ Schema principal aplicado")
+
+
+          # ------------------------------------------------------
+          # Migrations
+          # ------------------------------------------------------
 
           with open("database/migrate_add_previous_version.sql") as f:
+
               cur.execute(f.read())
+
           conn.commit()
 
-          # Remove entradas erradas do psr7 e força re-seed
+          print("✅ Migrations aplicadas")
+
+
+          # ------------------------------------------------------
+          # Remove versão incorreta conhecida
+          # ------------------------------------------------------
+
           cur.execute("""
+
               DELETE FROM homologated_versions
+
               WHERE package_name = 'guzzlehttp/psr7'
+
                 AND safe_version = '1.9.1'
+
           """)
+
           conn.commit()
+
+          print("✅ Cleanup executado")
+
+
+          # ------------------------------------------------------
+          # Seed
+          # ------------------------------------------------------
 
           try:
+
               with open("database/seed_homologated_versions.sql") as f:
+
                   cur.execute(f.read())
+
               conn.commit()
-              print("Seed aplicado")
+
+              print("✅ Seed aplicado")
+
           except Exception as e:
+
               conn.rollback()
-              print(f"Seed ja populado: {e}")
+
+              print(
+                  f"⚠️ Seed já existente ou parcialmente aplicado: {e}"
+              )
+
 
           conn.close()
-          print("Schema + migrations aplicados")
+
+          print("✅ Banco de dados preparado")
+
+
           EOF
 
-      # Agente de IA orquestra todo o pipeline:
-      # Stage 1: lê Trivy report + persiste no Supabase + consulta OSV
-      # Stage 2: IA analisa CVEs e decide estratégia (APPROVED/MANUAL_REVIEW)
-      # Stage 3: aplica patches via composer/npm/pip (multi-linguagem)
-      - name: Executar Agente de IA (Stages 1-3)
+
+      # ==========================================================
+      # EXECUÇÃO DO AGENTE DE IA
+      #
+      # Stage 1:
+      #   Persistência e enriquecimento
+      #
+      # Stage 2:
+      #   Decisão da IA
+      #
+      # Stage 3:
+      #   Aplicação da remediação
+      #
+      # A branch develop ainda não é alterada no remoto.
+      # ==========================================================
+
+      - name: Executar Agente de IA
+
         env:
+
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
           DB_SSLMODE: require
+
           GITHUB_REPOSITORY: ${{ github.repository }}
+
           GITHUB_RUN_ID: ${{ github.run_id }}
-          OPEN_ROUTER_API: ${{ secrets.OPEN_ROUTER_API }}
+
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
           MIN_SEVERITY: HIGH
-          AI_MODEL: google/gemini-2.5-flash
+
+          AI_MODEL: gemini-2.5-flash
+
           AI_TEMPERATURE: "0.1"
+
           AI_MAX_TOKENS: "600"
-        run: python framework.py
 
-      # Stage 4: Re-scan Trivy pós-patch (multi-linguagem)
-      # Trivy está instalado no Job 1, mas não no PATH do Python
-      # Por isso o re-scan é feito aqui como step do workflow
-      - name: Re-scan Trivy pós-patch (Stage 4)
         run: |
-          mkdir -p reports
-          trivy fs . --format json --output reports/report_post_patch.json \
-            --skip-version-check || true
-          trivy fs . --format table --severity CRITICAL,HIGH \
-            --skip-version-check || true
 
-      # Smoke test multilinguagem (Req 8)
-      - name: Smoke test (validação de estabilidade)
-        run: |
-          # PHP
-          if [ -f "composer.json" ] && command -v php &> /dev/null; then
-            echo "--- PHP smoke test ---"
-            for f in index.php; do
-              [ -f "$f" ] && php -l "$f" && echo "✅ $f: OK"
-            done
-            composer install --no-interaction --no-progress --prefer-dist 2>&1 | tail -3
-          fi
-          # Node.js
-          if [ -f "package.json" ] && command -v node &> /dev/null; then
-            echo "--- Node.js smoke test ---"
-            node --version && npm install --dry-run 2>&1 | tail -3
-          fi
-          # Python
-          if [ -f "requirements.txt" ] && command -v python &> /dev/null; then
-            echo "--- Python smoke test ---"
-            python -c "import pkg_resources; pkg_resources.require(open('requirements.txt').readlines())" 2>&1 | tail -3
-          fi
-          echo "✅ Smoke tests concluídos"
+          python framework.py
 
-      # Branch intermediária com nome FIXO: fix-remediation
-      # Força push (sobrescreve execuções anteriores)
-      # develop permanece intacto
-      - name: Publicar correções na branch fix-remediation
+
+      # ==========================================================
+      # CRIAÇÃO DA BRANCH fix/remediation
+      #
+      # Objetivo:
+      #
+      #   1. Capturar as alterações geradas pelo agente
+      #   2. Criar commit temporário
+      #   3. Voltar para origin/develop
+      #   4. Criar/atualizar fix/remediation baseada em develop
+      #   5. Aplicar somente o commit da remediação
+      #   6. Publicar fix/remediation
+      #
+      # IMPORTANTE:
+      #
+      # O push abaixo atualiza a branch fix/remediation.
+      #
+      # Depois que esse push terminar com sucesso,
+      # a Pipeline 2 será disparada explicitamente.
+      # ==========================================================
+
+      - name: Criar branch fix/remediation com patches
+
+        id: remediation-branch
+
         env:
+
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Cria ou reseta fix-remediation a partir do HEAD atual de develop
-          git checkout -B fix-remediation
+          set -e
 
-          # Força git a ver as mudanças do sistema de arquivos (composer require modifica esses arquivos)
-          git update-index --refresh 2>/dev/null || true
 
-          # Adiciona todos os arquivos de dependências modificados
-          for f in composer.json composer.lock package.json package-lock.json requirements.txt; do
-            if [ -f "$f" ]; then
-              git add -f "$f"
-              echo "Adicionado: $f"
-            fi
-          done
+          git config user.name \
+            "github-actions[bot]"
 
-          # Verifica se há mudanças staged
+          git config user.email \
+            "github-actions[bot]@users.noreply.github.com"
+
+
+          echo "📦 Verificando alterações geradas pelo agente"
+
+
+          # ------------------------------------------------------
+          # Adiciona todas as alterações
+          # ------------------------------------------------------
+
+          git add -A
+
+
+          # ------------------------------------------------------
+          # Verifica se existem alterações
+          # ------------------------------------------------------
+
           if git diff --cached --quiet; then
-            echo "HAS_CHANGES=false" >> $GITHUB_ENV
-            echo "Nenhuma alteração detectada — sem vulnerabilidades para corrigir."
-          else
-            git status --short
-            git commit -m "fix: remediação automática via agente de IA (run #${{ github.run_id }})"
-            git push origin fix-remediation --force
-            echo "HAS_CHANGES=true" >> $GITHUB_ENV
-            echo "Branch fix-remediation atualizada com as correções"
+
+            echo "📭 Nenhuma alteração gerada pelo agente"
+
+            echo "HAS_CHANGES=false" >> "$GITHUB_ENV"
+
+            exit 0
+
           fi
 
-      # Garante que homolog existe
-      - name: Garantir branch homolog
-        if: env.HAS_CHANGES == 'true'
-        run: |
-          git fetch origin
-          if ! git ls-remote --heads origin homolog | grep -q homolog; then
-            git checkout -b homolog
-            git push origin homolog
-            echo "Branch homolog criada"
-          fi
 
-      # Merge automático de fix-remediation em homolog
-      - name: Merge automático em homolog
+          # ------------------------------------------------------
+          # Cria commit temporário com as correções
+          # ------------------------------------------------------
+
+          git commit \
+            -m "fix: remediação automática via agente IA"
+
+
+          PATCH_COMMIT=$(git rev-parse HEAD)
+
+
+          echo "🔧 Commit de remediação: $PATCH_COMMIT"
+
+
+          # ------------------------------------------------------
+          # Atualiza referências remotas
+          # ------------------------------------------------------
+
+          git fetch origin develop
+
+
+          # ------------------------------------------------------
+          # Cria a branch fix/remediation a partir de develop
+          #
+          # Isso garante que:
+          #
+          # fix/remediation =
+          #     develop atual + somente correção da IA
+          # ------------------------------------------------------
+
+          echo "🌱 Criando fix/remediation baseada em origin/develop"
+
+
+          git checkout -B \
+            fix/remediation \
+            origin/develop
+
+
+          # ------------------------------------------------------
+          # Aplica somente o commit gerado pelo agente
+          # ------------------------------------------------------
+
+          echo "♻️ Aplicando somente o commit da remediação"
+
+
+          git cherry-pick "$PATCH_COMMIT"
+
+
+          # ------------------------------------------------------
+          # Publica a branch
+          #
+          # O --force garante que a branch represente exatamente
+          # o estado atual de develop + correção.
+          # ------------------------------------------------------
+
+          echo "🚀 Publicando fix/remediation"
+
+
+          git push \
+            origin \
+            fix/remediation \
+            --force
+
+
+          echo "HAS_CHANGES=true" >> "$GITHUB_ENV"
+
+
+          echo "✅ Correções publicadas em fix/remediation"
+
+
+      # ==========================================================
+      # DISPARO EXPLÍCITO DA PIPELINE 2
+      #
+      # Este passo só executa se:
+      #
+      #   - A remediação foi gerada
+      #   - O commit foi criado
+      #   - O cherry-pick funcionou
+      #   - O push para fix/remediation funcionou
+      #
+      # Portanto, quando a Pipeline 2 iniciar, a correção já estará
+      # disponível remotamente na branch fix/remediation.
+      #
+      # A Pipeline 2 será executada via workflow_dispatch.
+      # ==========================================================
+
+      - name: Disparar Pipeline 2 - Security Gate
+
         if: env.HAS_CHANGES == 'true'
+
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
         run: |
-          git checkout homolog
-          git pull origin homolog
 
-          git merge --no-ff origin/fix-remediation \
-            -m "chore: merge automatico da remediacao (run #${{ github.run_id }})" \
-            --allow-unrelated-histories
+          echo "🚀 Disparando Pipeline 2"
 
-          git push origin homolog
-          echo "Correcoes mergeadas em homolog automaticamente"
+          echo "📌 Branch: fix/remediation"
+
+          echo "📌 Commit: $(git rev-parse HEAD)"
+
+
+          gh workflow run homolog-security-gate.yml \
+            --repo "${{ github.repository }}" \
+            --ref fix/remediation
+
+
+          echo "✅ Pipeline 2 solicitada com sucesso"
+
+          echo "🔍 A validação será executada sobre a branch fix/remediation"

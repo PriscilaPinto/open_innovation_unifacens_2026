@@ -1,123 +1,662 @@
 name: DevSecOps - Security Gate (Homolog)
 
-# Dispara quando homolog recebe push (merge automático da pipeline 1)
-# A pipeline 1 NÃO é re-executada — este workflow é independente
+# ============================================================
+# PIPELINE 2 - SECURITY GATE
+#
+# Esta pipeline NÃO é disparada diretamente pelo push.
+#
+# A Pipeline 1:
+#
+#   1. Executa a remediação
+#   2. Cria/atualiza fix/remediation
+#   3. Faz push das correções
+#   4. Dispara este workflow via workflow_dispatch
+#   5. Informa explicitamente a referência fix/remediation
+#
+# Portanto, esta pipeline sempre valida:
+#
+#     fix/remediation
+#
+# Depois da validação:
+#
+#     fix/remediation
+#             │
+#             ▼
+#     PR automático
+#             │
+#             ▼
+#     homolog
+#
+# O MERGE para homolog NÃO é automático.
+# A aprovação e o merge continuam sendo humanos.
+# ============================================================
+
 on:
-  push:
-    branches: [homolog]
+
+  # ------------------------------------------------------------
+  # Disparo manual/explícito feito pela Pipeline 1
+  # ------------------------------------------------------------
+
   workflow_dispatch:
 
+  # ------------------------------------------------------------
+  # Permite execução manual pela interface do GitHub Actions
+  # ------------------------------------------------------------
+
 permissions:
-  contents: read
+
+  contents: write
+
+  pull-requests: write
+
+  actions: read
+
 
 jobs:
+
+  # ============================================================
+  # JOB: SECURITY GATE
+  #
+  # Responsabilidades:
+  #
+  # 1. Validar fix/remediation
+  # 2. Executar Trivy novamente
+  # 3. Executar smoke tests
+  # 4. Atualizar Supabase
+  # 5. Se aprovado:
+  #       abrir PR fix/remediation → homolog
+  #
+  # Importante:
+  #
+  # Esta pipeline NÃO faz merge automático.
+  # ============================================================
+
   security-gate:
-    name: 🧪 Re-scan e Validação em Homolog
+
+    name: 🧪 Re-scan e Validação da Remediação
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: homolog
 
-      # Re-scan com o código já corrigido em homolog
-      # exit-code 1 garante que o job falha se vuln persistir
-      - name: Re-scan Trivy
-        id: trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: .
-          format: table
-          severity: CRITICAL,HIGH
-          exit-code: '1'
+      # ==========================================================
+      # FASE 0: CHECKOUT
+      #
+      # A Pipeline 1 dispara este workflow usando:
+      #
+      # gh workflow run homolog-security-gate.yml \
+      #   --ref fix/remediation
+      #
+      # Portanto, o código validado é o estado atual da branch
+      # fix/remediation.
+      # ==========================================================
 
-      # Smoke test: valida sintaxe PHP após atualização das dependências
-      - name: Instalar dependências PHP
-        if: hashFiles('composer.json') != ''
+      - name: Checkout fix/remediation
+
+        uses: actions/checkout@v4
+
+        with:
+
+          ref: fix/remediation
+
+          fetch-depth: 0
+
+
+      # ==========================================================
+      # FASE 1: INSTALAÇÃO DO TRIVY
+      # ==========================================================
+
+      - name: Instalar Trivy
+
         run: |
-          sudo apt-get install -y php-cli --quiet
-          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-          composer install --no-interaction --no-progress --prefer-dist 2>&1 | tail -10
+
+          sudo apt-get install -y \
+            wget \
+            gnupg \
+            lsb-release \
+            --quiet
+
+
+          wget -qO - \
+            https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | sudo apt-key add -
+
+
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list
+
+
+          sudo apt-get update -qq
+
+
+          sudo apt-get install -y trivy
+
+
+          trivy --version
+
+
+      # ==========================================================
+      # FASE 1.1: RE-SCAN DE SEGURANÇA
+      #
+      # O objetivo é verificar se as vulnerabilidades CRITICAL
+      # e HIGH encontradas inicialmente foram corrigidas.
+      #
+      # O continue-on-error permite:
+      #
+      #   - Capturar o resultado
+      #   - Atualizar o Supabase
+      #   - Registrar a rejeição
+      #
+      # O PR só será criado se o resultado for SUCCESS.
+      # ==========================================================
+
+      - name: Re-scan Trivy
+
+        id: trivy
+
+        continue-on-error: true
+
+        run: |
+
+          set +e
+
+
+          echo "🔍 Iniciando re-scan de segurança"
+
+
+          echo "📌 Branch validada: fix/remediation"
+
+
+          trivy fs . \
+            --format table \
+            --severity CRITICAL,HIGH \
+            --exit-code 1
+
+
+          TRIVY_EXIT_CODE=$?
+
+
+          echo "TRIVY_EXIT_CODE=$TRIVY_EXIT_CODE" >> "$GITHUB_ENV"
+
+
+          if [ "$TRIVY_EXIT_CODE" -eq 0 ]; then
+
+            echo "=========================================="
+
+            echo "✅ Nenhuma vulnerabilidade CRITICAL/HIGH"
+
+            echo "=========================================="
+
+          else
+
+            echo "=========================================="
+
+            echo "❌ Vulnerabilidades CRITICAL/HIGH persistem"
+
+            echo "=========================================="
+
+          fi
+
+
+          exit 0
+
+
+      # ==========================================================
+      # FASE 1.2: VALIDAÇÃO EXPLÍCITA DO RESULTADO DO TRIVY
+      #
+      # Este step não falha imediatamente.
+      #
+      # O resultado será utilizado posteriormente para:
+      #
+      #   - Atualizar Supabase
+      #   - Decidir se o PR será criado
+      # ==========================================================
+
+      - name: Registrar resultado do Trivy
+
+        run: |
+
+          if [ "${TRIVY_EXIT_CODE}" = "0" ]; then
+
+            echo "✅ Security Gate: APROVADO"
+
+          else
+
+            echo "❌ Security Gate: REJEITADO"
+
+          fi
+
+
+      # ==========================================================
+      # FASE 2: SMOKE TEST PHP
+      #
+      # Executado somente se o projeto possuir:
+      #
+      #   composer.json
+      #   ou
+      #   arquivos PHP
+      # ==========================================================
 
       - name: Smoke test PHP
-        if: hashFiles('index.php') != ''
-        run: |
-          php -l index.php
-          echo "✅ Sintaxe PHP OK"
 
-      # Sucesso: atualiza status no Supabase
-      - name: Registrar sucesso no Supabase
-        if: success()
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DB_SSLMODE: require
+        if: hashFiles('composer.json') != '' || hashFiles('*.php') != ''
+
         run: |
-          pip install psycopg2-binary python-dotenv --quiet
+
+          echo "📦 Projeto PHP detectado"
+
+
+          # ------------------------------------------------------
+          # Instala PHP
+          # ------------------------------------------------------
+
+          sudo apt-get install -y \
+            php-cli \
+            php-curl \
+            php-mbstring \
+            php-xml \
+            --quiet
+
+
+          # ------------------------------------------------------
+          # Instala Composer
+          # ------------------------------------------------------
+
+          curl -sS \
+            https://getcomposer.org/installer \
+            | php \
+              -- \
+              --install-dir=/usr/local/bin \
+              --filename=composer
+
+
+          composer --version
+
+
+          # ------------------------------------------------------
+          # Instala dependências
+          #
+          # Se composer.lock existir, o Composer respeitará
+          # as versões travadas.
+          # ------------------------------------------------------
+
+          if [ -f "composer.json" ]; then
+
+            composer install \
+              --no-interaction \
+              --no-progress \
+              --prefer-dist
+
+          fi
+
+
+          # ------------------------------------------------------
+          # Validação de sintaxe PHP
+          # ------------------------------------------------------
+
+          PHP_FILES=$(find . \
+            -type f \
+            -name "*.php" \
+            -not -path "./vendor/*" \
+            -not -path "./.git/*")
+
+
+          if [ -n "$PHP_FILES" ]; then
+
+            echo "$PHP_FILES" | while read -r file; do
+
+              php -l "$file"
+
+              echo "✅ $file: sintaxe OK"
+
+            done
+
+          else
+
+            echo "ℹ️ Nenhum arquivo PHP encontrado para validação"
+
+          fi
+
+
+      # ==========================================================
+      # FASE 3: SMOKE TEST BÁSICO
+      #
+      # Verifica se a estrutura do projeto está íntegra.
+      # ==========================================================
+
+      - name: Smoke test básico
+
+        run: |
+
+          echo "🔍 Validando estrutura do projeto"
+
+
+          TOTAL_FILES=$(find . \
+            -type f \
+            -not -path './.git/*' \
+            -not -path './vendor/*' \
+            -not -path './__pycache__/*' \
+            | wc -l)
+
+
+          echo "📁 Total de arquivos: $TOTAL_FILES"
+
+
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+
+            echo "❌ Nenhum arquivo encontrado no projeto"
+
+            exit 1
+
+          fi
+
+
+          echo "✅ Estrutura do projeto íntegra"
+
+
+      # ==========================================================
+      # FASE 4: ATUALIZAÇÃO DO SUPABASE
+      #
+      # Registra o resultado desta validação.
+      #
+      # Se:
+      #
+      #   TRIVY_EXIT_CODE = 0
+      #
+      # então:
+      #
+      #   homolog_status = VALIDATED
+      #
+      # Caso contrário:
+      #
+      #   homolog_status = REJECTED
+      #
+      # IMPORTANTE:
+      #
+      # O registro utiliza o GITHUB_RUN_ID para localizar a
+      # execução correspondente.
+      # ==========================================================
+
+      - name: Registrar resultado no Supabase
+
+        env:
+
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+          DB_SSLMODE: require
+
+          GITHUB_RUN_ID: ${{ github.run_id }}
+
+        run: |
+
+          pip install \
+            psycopg2-binary \
+            python-dotenv \
+            --quiet
+
+
           python - <<'EOF'
+
           import sys
+          import os
+
+
           sys.path.insert(0, "scripts")
+
+
           from db import connect_db
 
-          conn = connect_db()
-          cur = conn.cursor()
-          cur.execute("""
-              UPDATE pipeline_executions
-              SET status = 'SUCCESS', finished_at = NOW()
-              WHERE status = 'RUNNING'
-              ORDER BY started_at DESC
-              LIMIT 1
-          """)
-          conn.commit()
-          conn.close()
-          print("✅ Status atualizado para SUCCESS no Supabase")
-          EOF
-
-      # Falha: registra no banco — develop continua seguro e inalterado
-      - name: Registrar falha no Supabase
-        if: failure()
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DB_SSLMODE: require
-        run: |
-          pip install psycopg2-binary python-dotenv --quiet
-          python - <<'EOF'
-          import sys
-          sys.path.insert(0, "scripts")
-          from db import connect_db
 
           conn = connect_db()
+
           cur = conn.cursor()
 
-          # Loga versões anteriores disponíveis para rollback manual
-          cur.execute("""
-              SELECT package_name, installed_version, previous_version
-              FROM vulnerability_records
-              WHERE remediation_status = 'REMEDIATED'
-                AND previous_version IS NOT NULL
-              ORDER BY updated_at DESC
-          """)
-          rows = cur.fetchall()
-          if rows:
-              print("Versões anteriores disponíveis para rollback:")
-              for pkg, installed, prev in rows:
-                  print(f"  {pkg}: {installed} ← {prev}")
+
+          trivy_exit = os.environ.get(
+              "TRIVY_EXIT_CODE",
+              "1"
+          )
+
+
+          workflow_run_id = os.environ.get(
+              "GITHUB_RUN_ID"
+          )
+
+
+          print(
+              f"🔎 Workflow Run ID: {workflow_run_id}"
+          )
+
+
+          print(
+              f"🔎 Resultado Trivy: {trivy_exit}"
+          )
+
+
+          # ======================================================
+          # SUCESSO
+          # ======================================================
+
+          if trivy_exit == "0":
+
+              print(
+                  "✅ Security Gate aprovado"
+              )
+
+
+              # --------------------------------------------------
+              # Atualiza a execução correspondente
+              #
+              # A busca utiliza o workflow_run_id para evitar
+              # atualizar uma execução antiga ou incorreta.
+              # --------------------------------------------------
+
+              cur.execute(
+                  """
+                  UPDATE pipeline_executions
+                  SET
+                      homolog_status = 'VALIDATED',
+                      finished_at = NOW()
+                  WHERE workflow_run_id = %s
+                  """,
+                  (
+                      workflow_run_id,
+                  )
+              )
+
+
+              print(
+                  f"✅ Execução {workflow_run_id} marcada como VALIDATED"
+              )
+
+
+          # ======================================================
+          # FALHA
+          # ======================================================
+
           else:
-              print("Nenhuma versão anterior registrada.")
 
-          cur.execute("""
-              UPDATE pipeline_executions
-              SET status = 'FAILED', finished_at = NOW()
-              WHERE status = 'RUNNING'
-              ORDER BY started_at DESC
-              LIMIT 1
-          """)
-          cur.execute("""
-              UPDATE vulnerability_records
-              SET remediation_status = 'ROLLED_BACK', updated_at = NOW()
-              WHERE remediation_status = 'REMEDIATED'
-          """)
+              print(
+                  "❌ Security Gate rejeitado"
+              )
+
+
+              # --------------------------------------------------
+              # Marca a execução atual como rejeitada
+              # --------------------------------------------------
+
+              cur.execute(
+                  """
+                  UPDATE pipeline_executions
+                  SET
+                      homolog_status = 'REJECTED',
+                      finished_at = NOW()
+                  WHERE workflow_run_id = %s
+                  """,
+                  (
+                      workflow_run_id,
+                  )
+              )
+
+
+              # --------------------------------------------------
+              # NÃO realiza rollback físico automaticamente.
+              #
+              # O framework registra que a remediação foi
+              # rejeitada.
+              #
+              # A branch fix/remediation continua disponível
+              # para análise.
+              # --------------------------------------------------
+
+              cur.execute(
+                  """
+                  UPDATE vulnerability_records
+                  SET
+                      remediation_status = 'ROLLED_BACK',
+                      updated_at = NOW()
+                  WHERE execution_id = (
+                      SELECT id
+                      FROM pipeline_executions
+                      WHERE workflow_run_id = %s
+                      LIMIT 1
+                  )
+                  AND remediation_status = 'REMEDIATED'
+                  """,
+                  (
+                      workflow_run_id,
+                  )
+              )
+
+
+              print(
+                  "⚠️ Remediações da execução marcadas como ROLLED_BACK"
+              )
+
+
           conn.commit()
+
+
+          cur.close()
+
           conn.close()
-          print("❌ Falha registrada no Supabase. Revise homolog manualmente.")
+
+
+          print(
+              "✅ Supabase atualizado"
+          )
+
+
           EOF
-          exit 1
+
+
+      # ==========================================================
+      # FASE 5: INSTALAÇÃO DO GITHUB CLI
+      #
+      # Utilizado para verificar/criar o Pull Request.
+      # ==========================================================
+
+      - name: Instalar GitHub CLI
+
+        if: env.TRIVY_EXIT_CODE == '0'
+        run: |
+
+          type -p curl >/dev/null \
+            || sudo apt-get install curl -y
+
+
+          curl -fsSL \
+            https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo dd \
+              of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+
+
+          sudo chmod go+r \
+            /usr/share/keyrings/githubcli-archive-keyring.gpg
+
+
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list \
+            >/dev/null
+
+
+          sudo apt-get update
+
+
+          sudo apt-get install \
+            gh \
+            -y
+
+
+          gh --version
+
+      # ==========================================================
+      # FASE 6: CRIAÇÃO DO PR PARA HOMOLOG
+      #
+      # Executado SOMENTE quando:
+      #
+      #   Trivy = sucesso
+      #
+      # O PR é:
+      #
+      #   fix/remediation → homolog
+      #
+      # O GitHub NÃO faz merge automaticamente.
+      #
+      # A aprovação e o merge dependem da política do repositório
+      # e da aprovação humana.
+      # ==========================================================
+
+      - name: Criar Pull Request para homolog
+        if: env.TRIVY_EXIT_CODE == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        run: |
+          set -e
+
+          echo "🔎 Verificando se já existe PR aberto"
+
+          EXISTING_PR=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --base homolog \
+            --head fix/remediation \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "ℹ️ PR já existe: #$EXISTING_PR"
+            echo "ℹ️ Nenhum novo PR será criado"
+            exit 0
+          fi
+
+          echo "🚀 Criando PR fix/remediation → homolog"
+
+          gh pr create \
+            --repo "${{ github.repository }}" \
+            --base homolog \
+            --head fix/remediation \
+            --title "chore: remediação validada - promover para homolog" \
+            --body "$(cat <<'EOF'
+          ## 🔒 Remediação validada automaticamente
+
+          A branch `fix/remediation` passou pelo Security Gate.
+
+          ### Validações executadas
+
+          - ✅ Re-scan Trivy
+          - ✅ Nenhuma vulnerabilidade `CRITICAL` ou `HIGH` persistente
+          - ✅ Smoke test executado
+          - ✅ Estrutura do projeto validada
+          - ✅ Resultado registrado no Supabase
+
+          ### Próxima etapa
+
+          A remediação está pronta para promoção para a branch `homolog`.
+
+          > ⚠️ O merge não é realizado automaticamente.
+          >
+          > A aprovação e o merge deste Pull Request permanecem sob responsabilidade humana, conforme as regras de proteção da branch e as políticas do repositório.
+          EOF
+          )"
