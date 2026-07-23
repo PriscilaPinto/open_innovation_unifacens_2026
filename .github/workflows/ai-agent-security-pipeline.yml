@@ -2,230 +2,616 @@ name: DevSecOps - Remediação Automática
 
 on:
   push:
-    branches: [develop]
+    branches:
+      - develop
+
   workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
+  actions: write
+
 
 jobs:
+
   # ============================================================
-  # JOB 1: Scan de vulnerabilidades (develop — somente leitura)
+  # JOB 1: SCAN DE VULNERABILIDADES
+  #
+  # Executado exclusivamente sobre a branch develop.
+  #
+  # Responsabilidade:
+  #   - Executar o Trivy
+  #   - Gerar relatório JSON
+  #   - Disponibilizar o relatório para o agente de IA
+  #
+  # IMPORTANTE:
+  #   Este job NÃO altera a branch develop.
   # ============================================================
+
   security-scan:
+
     name: 🔍 Trivy SCA Scan
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # Checkout da branch develop
+      # ----------------------------------------------------------
+
+      - name: Checkout develop
+
+        uses: actions/checkout@v4
+
         with:
           ref: develop
+          fetch-depth: 0
+
+
+      # ----------------------------------------------------------
+      # Instalação do Trivy
+      # ----------------------------------------------------------
 
       - name: Instalar Trivy
+
         run: |
-          sudo apt-get install -y wget gnupg lsb-release --quiet
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+
+          sudo apt-get install -y \
+            wget \
+            gnupg \
+            lsb-release \
+            --quiet
+
+          wget -qO - \
+            https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | sudo apt-key add -
+
           echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
             | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update -qq && sudo apt-get install -y trivy
 
-      - name: Scan JSON (para processamento pelo agente)
+          sudo apt-get update -qq
+
+          sudo apt-get install -y trivy
+
+
+      # ----------------------------------------------------------
+      # Scan Trivy em JSON
+      #
+      # O relatório será consumido posteriormente pelo framework.
+      # ----------------------------------------------------------
+
+      - name: Scan JSON para processamento pelo agente
+
         run: |
+
           mkdir -p reports
-          trivy fs . --format json --output reports/report.json --skip-version-check
 
-      - name: Scan tabela (visualização no log)
+          trivy fs . \
+            --format json \
+            --output reports/report.json \
+            --skip-version-check
+
+
+      # ----------------------------------------------------------
+      # Scan Trivy em formato de tabela
+      #
+      # Serve para visualização no log do GitHub Actions.
+      #
+      # Não bloqueia o pipeline neste momento.
+      # A validação definitiva será feita pela Pipeline 2.
+      # ----------------------------------------------------------
+
+      - name: Scan tabela para visualização
+
         run: |
-          trivy fs . --format table --severity CRITICAL,HIGH,MEDIUM --skip-version-check || true
 
-      - uses: actions/upload-artifact@v4
+          trivy fs . \
+            --format table \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --skip-version-check \
+            || true
+
+
+      # ----------------------------------------------------------
+      # Upload do relatório para o próximo Job
+      # ----------------------------------------------------------
+
+      - name: Upload do relatório Trivy
+
+        uses: actions/upload-artifact@v4
+
         with:
           name: trivy-report-${{ github.run_id }}
           path: reports/report.json
 
-# ============================================================
-# JOB 2: Agente de IA processa vulnerabilidades, aplica
-#         correções e publica em fix/remediation
-#
-# develop NÃO é alterado.
-# Branch intermediária: fix/remediation
-#
-# O push nessa branch dispara a Pipeline 2
-# ============================================================
+
+  # ============================================================
+  # JOB 2: REMEDIAÇÃO AUTOMÁTICA
+  #
+  # Fluxo:
+  #
+  # develop
+  #    ↓
+  # Trivy Report
+  #    ↓
+  # framework.py
+  #    ↓
+  # IA analisa
+  #    ↓
+  # Correções aplicadas
+  #    ↓
+  # fix/remediation
+  #
+  # A branch develop NÃO é alterada diretamente.
+  # ============================================================
+
   remediation:
-    name: 🤖 Agente IA - Remediação (develop → fix/remediation)
-    needs: security-scan
+
+    name: 🤖 Agente IA - Remediação
+
+    needs:
+      - security-scan
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # Checkout da branch develop
+      # ----------------------------------------------------------
+
+      - name: Checkout develop
+
+        uses: actions/checkout@v4
+
         with:
           ref: develop
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+
+      # ----------------------------------------------------------
+      # Download do relatório gerado pelo Job 1
+      # ----------------------------------------------------------
+
+      - name: Download do relatório Trivy
+
+        uses: actions/download-artifact@v4
+
         with:
           name: trivy-report-${{ github.run_id }}
           path: reports/
 
-      - uses: actions/setup-python@v5
+
+      # ----------------------------------------------------------
+      # Configuração do Python
+      # ----------------------------------------------------------
+
+      - name: Configurar Python
+
+        uses: actions/setup-python@v5
+
         with:
           python-version: '3.10'
 
+
+      # ----------------------------------------------------------
+      # Instalação das dependências Python
+      # ----------------------------------------------------------
+
       - name: Instalar dependências Python
-        run: pip install -r requirements.txt --quiet
 
-      # Lê o relatório Trivy para detectar ecossistemas (SCA puro)
-      # e instala APENAS os gerenciadores necessários para os patches
-      - name: Detectar ecossistemas no Trivy e instalar dependências
         run: |
+
+          pip install \
+            -r requirements.txt \
+            --quiet
+
+
+      # ==========================================================
+      # DETECÇÃO DOS ECOSSISTEMAS
+      #
+      # Instala somente os gerenciadores necessários para que
+      # o agente possa aplicar as correções.
+      # ==========================================================
+
+      - name: Detectar ecossistemas e instalar dependências
+
+        run: |
+
+          # ------------------------------------------------------
+          # PHP / Composer
+          # ------------------------------------------------------
+
           if grep -q '"Type": "composer"' reports/report.json 2>/dev/null; then
-            echo "📦 PHP (composer) detectado no Trivy — instalando..."
-            sudo apt-get install -y php-cli php-curl php-mbstring php-xml --quiet
-            curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+            echo "📦 PHP (Composer) detectado no Trivy"
+
+            sudo apt-get install -y \
+              php-cli \
+              php-curl \
+              php-mbstring \
+              php-xml \
+              --quiet
+
+            curl -sS \
+              https://getcomposer.org/installer \
+              | php \
+                -- \
+                --install-dir=/usr/local/bin \
+                --filename=composer
+
             composer --version
-          fi
-          if grep -q '"Type": "npm"' reports/report.json 2>/dev/null || grep -q '"Type": "package"' reports/report.json 2>/dev/null; then
-            echo "📦 Node.js (npm) detectado no Trivy — instalando..."
-            sudo apt-get install -y nodejs npm --quiet
-            node --version
-            npm --version
-          fi
-          if grep -q '"Type": "pip"' reports/report.json 2>/dev/null || grep -q '"Type": "poetry"' reports/report.json 2>/dev/null; then
-            echo "📦 Python (pip) detectado no Trivy — já instalado com Python"
+
           fi
 
-      - name: Aplicar schema e migrations no Supabase
+
+          # ------------------------------------------------------
+          # Node.js / npm
+          # ------------------------------------------------------
+
+          if grep -q '"Type": "npm"' reports/report.json 2>/dev/null \
+             || grep -q '"Type": "package"' reports/report.json 2>/dev/null; then
+
+            echo "📦 Node.js (npm) detectado no Trivy"
+
+            sudo apt-get install -y \
+              nodejs \
+              npm \
+              --quiet
+
+            node --version
+
+            npm --version
+
+          fi
+
+
+          # ------------------------------------------------------
+          # Python / pip / poetry
+          # ------------------------------------------------------
+
+          if grep -q '"Type": "pip"' reports/report.json 2>/dev/null \
+             || grep -q '"Type": "poetry"' reports/report.json 2>/dev/null; then
+
+            echo "📦 Python detectado no Trivy"
+
+            python --version
+
+            pip --version
+
+          fi
+
+
+      # ==========================================================
+      # BANCO DE DADOS
+      #
+      # Aplica:
+      #   - Schema
+      #   - Migrations
+      #   - Cleanup
+      #   - Seed de versões homologadas
+      #
+      # O processo é idempotente conforme os scripts SQL.
+      # ==========================================================
+
+      - name: Aplicar schema, migrations e seed no Supabase
+
         env:
+
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
           DB_SSLMODE: require
+
         run: |
+
           python - <<'EOF'
+
           import sys
+
           sys.path.insert(0, "scripts")
+
           from db import connect_db
 
+
           conn = connect_db()
+
           cur = conn.cursor()
 
+
+          # ------------------------------------------------------
           # Schema principal
+          # ------------------------------------------------------
+
           with open("database/schema.sql") as f:
+
               cur.execute(f.read())
+
           conn.commit()
+
           print("✅ Schema principal aplicado")
 
-          # Todas as migrations em um arquivo
-          with open("database/migrate_add_previous_version.sql") as f:
-              cur.execute(f.read())
-          conn.commit()
-          print("✅ Migrations aplicadas (previous_version + source_db)")
 
-          # Remove entradas erradas do psr7 e força re-seed
-          cur.execute("""
-              DELETE FROM homologated_versions
-              WHERE package_name = 'guzzlehttp/psr7'
-                AND safe_version = '1.9.1'
-          """)
+          # ------------------------------------------------------
+          # Migrations
+          # ------------------------------------------------------
+
+          with open("database/migrate_add_previous_version.sql") as f:
+
+              cur.execute(f.read())
+
           conn.commit()
-          print("✅ Cleanup: versão psr7 1.9.1 removida")
+
+          print("✅ Migrations aplicadas")
+
+
+          # ------------------------------------------------------
+          # Remove versão incorreta conhecida
+          # ------------------------------------------------------
+
+          cur.execute("""
+
+              DELETE FROM homologated_versions
+
+              WHERE package_name = 'guzzlehttp/psr7'
+
+                AND safe_version = '1.9.1'
+
+          """)
+
+          conn.commit()
+
+          print("✅ Cleanup executado")
+
+
+          # ------------------------------------------------------
+          # Seed
+          # ------------------------------------------------------
 
           try:
+
               with open("database/seed_homologated_versions.sql") as f:
+
                   cur.execute(f.read())
+
               conn.commit()
+
               print("✅ Seed aplicado")
+
           except Exception as e:
+
               conn.rollback()
-              print(f"⚠️  Seed já populado: {e}")
+
+              print(
+                  f"⚠️ Seed já existente ou parcialmente aplicado: {e}"
+              )
+
 
           conn.close()
-          print("✅ BD pronto: schema + migrations + seed!")
+
+          print("✅ Banco de dados preparado")
+
+
           EOF
 
-      # Agente de IA orquestra todo o pipeline:
-      # Stage 1: lê Trivy report + persiste no Supabase + consulta OSV
-      # Stage 2: IA analisa CVEs e decide estratégia (APPROVED/MANUAL_REVIEW)
-      # Stage 3: aplica patches via composer/npm/pip (multi-linguagem)
-      - name: Executar Agente de IA (Stages 1-3)
+
+      # ==========================================================
+      # EXECUÇÃO DO AGENTE DE IA
+      #
+      # Stage 1:
+      #   Persistência e enriquecimento
+      #
+      # Stage 2:
+      #   Decisão da IA
+      #
+      # Stage 3:
+      #   Aplicação da remediação
+      #
+      # A branch develop ainda não é alterada no remoto.
+      # ==========================================================
+
+      - name: Executar Agente de IA
+
         env:
+
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
           DB_SSLMODE: require
+
           GITHUB_REPOSITORY: ${{ github.repository }}
+
           GITHUB_RUN_ID: ${{ github.run_id }}
+
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
           MIN_SEVERITY: HIGH
+
           AI_MODEL: gemini-2.5-flash
+
           AI_TEMPERATURE: "0.1"
+
           AI_MAX_TOKENS: "600"
-        run: python framework.py
 
-      # Stage 4: Re-scan Trivy é feito na security-gate em homolog
-      # (não repetir aqui — trivy não está instalado neste job)
-      # Responsabilidade: job security-scan instala trivy, não este job
-
-      # ============================================================
-      # ============================================================
-      # CRÍTICO: Branch fix/remediation baseada em origin/develop
-      #
-      # FLUXO CORRETO:
-      #   1. Stage das alterações geradas pelo agente
-      #   2. Commit temporário dos patches
-      #   3. fix/remediation criada a partir de ORIGIN/DEVELOP
-      #   4. Cherry-pick somente das correções geradas
-      #   5. Push para fix/remediation
-      #
-      # A Pipeline 2 será disparada pelo push nessa branch
-      # e será responsável pela validação e promoção para homolog
-      # ============================================================
-      # ============================================================
-      # ============================================================
-      # CRÍTICO: Branch fix/remediation baseada em origin/develop
-      #
-      # FLUXO CORRETO:
-      #   1. Stage das alterações geradas pelo agente
-      #   2. Commit temporário dos patches
-      #   3. fix/remediation criada a partir de ORIGIN/DEVELOP
-      #      (garante que a base é develop remoto)
-      #   4. Cherry-pick somente das correções geradas
-      #   5. Push para fix/remediation
-      #
-      # A Pipeline 2 será disparada pelo push nessa branch
-      # e será responsável pela validação e promoção para homolog
-      # ============================================================
-      - name: Criar branch fix/remediation com patches
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          echo "📦 Salvando alterações geradas pelo agente"
+          python framework.py
+
+
+      # ==========================================================
+      # CRIAÇÃO DA BRANCH fix/remediation
+      #
+      # Objetivo:
+      #
+      #   1. Capturar as alterações geradas pelo agente
+      #   2. Criar commit temporário
+      #   3. Voltar para origin/develop
+      #   4. Criar/atualizar fix/remediation baseada em develop
+      #   5. Aplicar somente o commit da remediação
+      #   6. Publicar fix/remediation
+      #
+      # IMPORTANTE:
+      #
+      # O push abaixo atualiza a branch fix/remediation.
+      #
+      # Depois que esse push terminar com sucesso,
+      # a Pipeline 2 será disparada explicitamente.
+      # ==========================================================
+
+      - name: Criar branch fix/remediation com patches
+
+        id: remediation-branch
+
+        env:
+
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        run: |
+
+          set -e
+
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "github-actions[bot]@users.noreply.github.com"
+
+
+          echo "📦 Verificando alterações geradas pelo agente"
+
+
+          # ------------------------------------------------------
+          # Adiciona todas as alterações
+          # ------------------------------------------------------
 
           git add -A
 
+
+          # ------------------------------------------------------
+          # Verifica se existem alterações
+          # ------------------------------------------------------
+
           if git diff --cached --quiet; then
-            echo "HAS_CHANGES=false" >> $GITHUB_ENV
+
             echo "📭 Nenhuma alteração gerada pelo agente"
+
+            echo "HAS_CHANGES=false" >> "$GITHUB_ENV"
+
             exit 0
+
           fi
 
-          git commit -m "fix: remediação automática via agente IA"
+
+          # ------------------------------------------------------
+          # Cria commit temporário com as correções
+          # ------------------------------------------------------
+
+          git commit \
+            -m "fix: remediação automática via agente IA"
+
 
           PATCH_COMMIT=$(git rev-parse HEAD)
 
-          echo "🌱 Criando branch fix/remediation baseada em origin/develop"
 
-          git checkout -B fix/remediation origin/develop
+          echo "🔧 Commit de remediação: $PATCH_COMMIT"
 
-          echo "♻️ Aplicando somente o commit de correção"
 
-          git cherry-pick $PATCH_COMMIT
+          # ------------------------------------------------------
+          # Atualiza referências remotas
+          # ------------------------------------------------------
 
-          echo "🚀 Enviando correções para fix/remediation"
+          git fetch origin develop
 
-          git push origin fix/remediation --force
 
-          echo "HAS_CHANGES=true" >> $GITHUB_ENV
+          # ------------------------------------------------------
+          # Cria a branch fix/remediation a partir de develop
+          #
+          # Isso garante que:
+          #
+          # fix/remediation =
+          #     develop atual + somente correção da IA
+          # ------------------------------------------------------
+
+          echo "🌱 Criando fix/remediation baseada em origin/develop"
+
+
+          git checkout -B \
+            fix/remediation \
+            origin/develop
+
+
+          # ------------------------------------------------------
+          # Aplica somente o commit gerado pelo agente
+          # ------------------------------------------------------
+
+          echo "♻️ Aplicando somente o commit da remediação"
+
+
+          git cherry-pick "$PATCH_COMMIT"
+
+
+          # ------------------------------------------------------
+          # Publica a branch
+          #
+          # O --force garante que a branch represente exatamente
+          # o estado atual de develop + correção.
+          # ------------------------------------------------------
+
+          echo "🚀 Publicando fix/remediation"
+
+
+          git push \
+            origin \
+            fix/remediation \
+            --force
+
+
+          echo "HAS_CHANGES=true" >> "$GITHUB_ENV"
+
 
           echo "✅ Correções publicadas em fix/remediation"
-          
+
+
+      # ==========================================================
+      # DISPARO EXPLÍCITO DA PIPELINE 2
+      #
+      # Este passo só executa se:
+      #
+      #   - A remediação foi gerada
+      #   - O commit foi criado
+      #   - O cherry-pick funcionou
+      #   - O push para fix/remediation funcionou
+      #
+      # Portanto, quando a Pipeline 2 iniciar, a correção já estará
+      # disponível remotamente na branch fix/remediation.
+      #
+      # A Pipeline 2 será executada via workflow_dispatch.
+      # ==========================================================
+
+      - name: Disparar Pipeline 2 - Security Gate
+
+        if: env.HAS_CHANGES == 'true'
+
+        env:
+
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        run: |
+
+          echo "🚀 Disparando Pipeline 2"
+
+          echo "📌 Branch: fix/remediation"
+
+          echo "📌 Commit: $(git rev-parse HEAD)"
+
+
+          gh workflow run homolog-security-gate.yml \
+            --repo "${{ github.repository }}" \
+            --ref fix/remediation
+
+
+          echo "✅ Pipeline 2 solicitada com sucesso"
+
+          echo "🔍 A validação será executada sobre a branch fix/remediation"
