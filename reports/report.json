@@ -3,12 +3,8 @@
   "Trivy": {
     "Version": "0.72.0"
   },
-  "ReportID": "019f9637-4b28-7cb5-80dd-27b8055b3c68",
-  "CreatedAt": "2026-07-24T22:20:33.960834287Z",
-  "ReportID": "019f9164-a5c5-7520-97f8-b1f27092a983",
-  "CreatedAt": "2026-07-23T23:52:00.197337212Z",
-  "ReportID": "019f90ba-1880-7412-a577-514227715f1f",
-  "CreatedAt": "2026-07-23T20:45:42.912268109Z",
+  "ReportID": "019fb039-b7f1-747e-bb1e-61c3401acab3",
+  "CreatedAt": "2026-07-29T23:33:20.497295719Z",
   "ArtifactID": "sha256:044c055df9b337b4a118bd921937c9364bbd0b0bad50975f1ff11d815c281524",
   "ArtifactName": ".",
   "ArtifactType": "repository",
@@ -373,7 +369,7 @@
             "UID": "72370125e4e1dc33"
           },
           "InstalledVersion": "6.3.0",
-          "FixedVersion": "6.5.8, 7.4.5",
+          "FixedVersion": "7.4.5, 6.5.8",
           "Status": "fixed",
           "SeveritySource": "nvd",
           "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2022-31090",
@@ -578,6 +574,7 @@
             "URL": "https://github.com/advisories?query=type%3Areviewed+ecosystem%3Acomposer"
           },
           "Fingerprint": "sha256:f28f39568cc1065e125f433bedfa17bd85f155f154291db537d84390dce3ff39",
+          "Title": "guzzle/guzzle: Guzzle: Cross-host cookie disclosure and injection due to improper domain matching in CookieJar.",
           "Title": "Guzzle is an extensible PHP HTTP client. Prior to 7.12.3, CookieJar di ...",
           "Description": "Guzzle is an extensible PHP HTTP client. Prior to 7.12.3, CookieJar did not restrict cookies scoped to IP-address or bare-numeric Domain values to the exact host that set them, because SetCookie::matchesDomain() applied ordinary suffix matching to domains such as 192.168.0.1, [::1], or 1, allowing cross-host cookie disclosure, cookie injection, or session fixation. This issue is fixed in version 7.12.3.",
           "Severity": "MEDIUM",
@@ -587,6 +584,8 @@
           ],
           "VendorSeverity": {
             "ghsa": 2,
+            "nvd": 2,
+            "redhat": 2
             "nvd": 2
           },
           "CVSS": {
@@ -597,6 +596,14 @@
             "nvd": {
               "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
               "V3Score": 6.1
+            },
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N",
+              "V3Score": 4.7
+            }
+          },
+          "References": [
+            "https://access.redhat.com/security/cve/CVE-2026-59883",
             }
           },
           "References": [
@@ -605,6 +612,8 @@
             "https://github.com/guzzle/guzzle/pull/3694",
             "https://github.com/guzzle/guzzle/releases/tag/7.12.3",
             "https://github.com/guzzle/guzzle/security/advisories/GHSA-g446-98w2-8p5w",
+            "https://nvd.nist.gov/vuln/detail/CVE-2026-59883",
+            "https://www.cve.org/CVERecord?id=CVE-2026-59883"
             "https://nvd.nist.gov/vuln/detail/CVE-2026-59883"
           ],
           "PublishedDate": "2026-07-08T17:17:26.737Z",
