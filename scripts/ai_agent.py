@@ -2,13 +2,17 @@
 Agente de IA - Cérebro do Framework de Remediação
 Requisito 3: Análise orientada por IA via Google Gemini (gratuito)
 Requisito 10: Retry com backoff exponencial até 5 tentativas
-Requisito 4: Escolher VERSÃO MÍNIMA MITIGADA (same-major strategy)
+Requisito 4: A IA é a TOMADORA DE DECISÃO. Trivy, OSV e o banco curado
+             fornecem EVIDÊNCIAS; same-major é uma preferência de
+             compatibilidade, não uma restrição de segurança imposta
+             antes da IA decidir.
 
 NOTA: Usa Google Generative AI direto (sem OpenRouter).
       Chave gratuita em: https://aistudio.google.com/apikey
       Modelo: gemini-2.5-flash (gratuito, 60 req/min)
 """
 import os
+import re
 import json
 import time
 import google.generativeai as genai
@@ -93,17 +97,113 @@ def get_curated_versions(package_name, ecosystem):
     return []
 
 
+def _normalize_versions(value):
+    """Converte FixedVersion/versões do OSV em uma lista de versões individuais."""
+    if not value:
+        return []
+
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+
+    versions = []
+    for item in values:
+        if not item:
+            continue
+        if isinstance(item, str):
+            # Trivy pode entregar "7.15.2, 8.0.1"
+            parts = re.split(r"\s*,\s*|\s*;\s*", item)
+            versions.extend(p.strip() for p in parts if p.strip())
+        else:
+            versions.append(str(item))
+
+    # Remove duplicatas preservando ordem
+    return list(dict.fromkeys(versions))
+
+
+def _version_key(version):
+    """Chave simples para comparação semântica de versões."""
+    try:
+        from packaging.version import Version
+        return Version(str(version).lstrip("v"))
+    except Exception:
+        nums = re.findall(r"\d+", str(version))
+        return tuple(int(n) for n in nums)
+
+
+def _max_version(versions):
+    versions = _normalize_versions(versions)
+    if not versions:
+        return None
+    return max(versions, key=_version_key)
+
+
+def _select_curated_version(curated_versions, fixed_versions, installed_version):
+    """
+    Seleciona a menor versão homologada que seja >= à maior versão
+    de correção informada pelo Trivy para o conjunto de CVEs.
+
+    A preferência same-major é aplicada somente quando existe uma
+    versão homologada segura dentro do mesmo major. Caso contrário,
+    permite major superior.
+    """
+    curated = [
+        v["version"] for v in curated_versions
+        if v.get("version")
+    ]
+    fixed = _normalize_versions(fixed_versions)
+
+    if not curated:
+        return None
+
+    required = _max_version(fixed)
+    if not required:
+        # Sem FixedVersion consolidada, não inventa uma versão.
+        return None
+
+    installed_major = str(installed_version).lstrip("v").split(".")[0]
+
+    # Primeiro tenta homologada same-major e >= ao maior requisito.
+    same_major = [
+        v for v in curated
+        if str(v).lstrip("v").split(".")[0] == installed_major
+        and _version_key(v) >= _version_key(required)
+    ]
+    if same_major:
+        return min(same_major, key=_version_key)
+
+    # Se não existe same-major suficiente, permite major superior.
+    newer = [v for v in curated if _version_key(v) >= _version_key(required)]
+    if newer:
+        return min(newer, key=_version_key)
+
+    return None
+
+
 def analisar_pacote(package_name, installed_version, severity, cves,
                      fixed_versions, ecosystem, recommended_version=None):
     """
-    Req 3: IA consulta OSV e decide estratégia de remediação para um pacote.
-    Req 4: Escolhe VERSÃO MÍNIMA MITIGADA consultando banco curado.
-    Consolida múltiplas CVEs do mesmo pacote em uma única decisão (Req 3.5).
+    Req 3: IA consulta evidências de Trivy/OSV e decide a remediação.
+    Req 4: banco curado fornece versões homologadas.
+    Req 3.5: múltiplas CVEs do mesmo pacote são consolidadas.
     """
     client = get_client()
-    
-    # Req 4: Consulta versões aprovadas no banco curado
+
     curated_versions = get_curated_versions(package_name, ecosystem)
+    fixed_versions = _normalize_versions(fixed_versions)
+
+    # Determina a maior versão necessária para corrigir TODAS as CVEs.
+    minimum_required_version = _max_version(fixed_versions)
+
+    # O banco curado é uma fonte de evidência/homologação, não apenas
+    # uma lista decorativa. Já calculamos a menor homologada que atende
+    # ao conjunto de correções informado pelo Trivy.
+    curated_candidate = _select_curated_version(
+        curated_versions,
+        fixed_versions,
+        installed_version
+    )
 
     context = {
         "package": package_name,
@@ -111,79 +211,124 @@ def analisar_pacote(package_name, installed_version, severity, cves,
         "installed_version": installed_version,
         "highest_severity": severity,
         "cves_affected": cves,
-        "fixed_versions_available": fixed_versions if isinstance(fixed_versions, list) else [fixed_versions] if fixed_versions else [],
+        "fixed_versions_available": fixed_versions,
+        "minimum_version_required_by_trivy": minimum_required_version,
         "recommended_version_from_osv": recommended_version,
         "curated_approved_versions": [v["version"] for v in curated_versions],
-        "project_type": "legacy - minimize breaking changes, same-major preferred"
+        "curated_candidate_meeting_trivy_requirements": curated_candidate,
+        "project_type": "legacy - minimize breaking changes; same-major preferred"
     }
 
-    prompt = f"""You are an autonomous DevSecOps security agent for legacy projects.
+    prompt = f"""You are an autonomous DevSecOps security agent.
 
-Analyze this vulnerability and decide the best remediation strategy.
-IMPORTANT: Choose the MINIMUM VERSION that fixes all CVEs (same-major strategy).
+You are the FINAL DECISION MAKER. Trivy, OSV and the curated database
+provide technical evidence; they do not make the decision for you.
+
+Analyze ALL CVEs of this package together and choose ONE remediation version.
 
 Context:
 {json.dumps(context, indent=2)}
 
-Decision rules:
-1. CRITICAL/HIGH severity with safe version → APPROVE (minimum safe version)
-2. Prefer same-major version to avoid breaking changes (e.g., 6.3.0 → 6.5.8, NOT 7.x)
-3. If curated_approved_versions exist, prefer one of them
-4. If recommended_version_from_osv exists and is same-major, validate it
-5. MEDIUM: APPROVE only if update risk is LOW and version is well-tested
-6. LOW: IGNORE (not worth the risk)
-7. If NO safe remediation exists: MANUAL_REVIEW
-8. Consolidate all CVEs of same package into ONE version update
+Mandatory security rules:
+1. The selected version MUST fix ALL CVEs listed in cves_affected.
+2. Use Trivy fixed_versions_available as the primary evidence for the
+   minimum security requirement.
+3. Do NOT choose an OSV version merely because it fixes one CVE if another
+   CVE requires a newer version.
+4. If a curated_candidate_meeting_trivy_requirements exists, strongly
+   prefer it because it is homologated by the security team.
+5. same-major is a COMPATIBILITY PREFERENCE, NOT a security restriction.
+6. If no safe same-major homologated version exists, a newer major may be
+   selected when it is the first safe/homologated option.
+7. CRITICAL/HIGH with a safe homologated version should normally be APPROVED.
+8. MEDIUM may be APPROVED when the selected version is safe and homologated.
+9. LOW may be IGNORE when remediation risk outweighs the security benefit.
+10. If the evidence is insufficient to select a safe version, use MANUAL_REVIEW.
+11. Consolidate all CVEs of this package into ONE version update.
 
-Respond ONLY with a valid JSON object, no markdown, no code fences.
-Use this exact structure (values are examples only, replace with real data):
-{"approved": true, "recommended_version": "MINIMUM_SAFE_VERSION", "risk_level": "LOW_or_MEDIUM_or_HIGH", "strategy": "same-major_or_newer_or_virtual_patch", "justification": "Brief explanation why this version was chosen"}"""
+For this decision, do not select a version lower than
+minimum_version_required_by_trivy.
+
+Respond ONLY with valid JSON:
+{{"approved": true, "recommended_version": "VERSION", "risk_level": "LOW|MEDIUM|HIGH", "strategy": "same-major|newer-major|virtual-patch|manual-review", "justification": "Brief explanation using Trivy, OSV and curated evidence."}}"""
 
     try:
-        content = _call_with_retry(client, prompt)
+        content = _call_with_retry(client, prompt).strip()
 
-        # Remove markdown fences se presentes
-        content = content.strip()
         if content.startswith("```"):
             lines = content.split("\n")
             if len(lines) > 2 and lines[-1].strip() == "```":
                 content = "\n".join(lines[1:-1])
             else:
                 content = "\n".join(lines[1:])
+
         content = content.strip()
 
-        # Tenta parse direto
         try:
             result = json.loads(content)
-            return result
         except json.JSONDecodeError:
-            # Fallback: extrai JSON via regex (lida com strings quebradas)
-            import re
-            match = re.search(r'\{.*?"approved"\s*:\s*(true|false).*?\}', content, re.DOTALL)
-            if match:
-                raw = match.group(0)
-                raw = raw.replace('\n', ' ').replace('\r', ' ')
-                # Remove aspas escapadas incorretamente
-                raw = raw.replace('\\"', "'")
-                result = json.loads(raw)
-                return result
-            raise
+            match = re.search(
+                r'\{.*?"approved"\s*:\s*(true|false).*?\}',
+                content,
+                re.DOTALL
+            )
+            if not match:
+                raise
+            raw = match.group(0).replace("\n", " ").replace("\r", " ")
+            raw = raw.replace('\\"', "'")
+            result = json.loads(raw)
 
-    # Fallback: prefere curated se existir, caso contrário usa OSV
-    safe_ver = None
-    if curated_versions:
-        safe_ver = curated_versions[0]["version"]  # Já ordenada por approved_at DESC
-    elif recommended_version:
-        safe_ver = recommended_version
-    
-    return {
-        "approved": severity in ("CRITICAL", "HIGH") and bool(safe_ver),
-        "recommended_version": safe_ver,
-        "risk_level": "MEDIUM",
-        "strategy": "fallback: curated or osv",
-        "justification": f"Fallback: severity={severity}, curated={bool(curated_versions)}, version={safe_ver}"
-    }
+        # Guardrail: a IA não pode aprovar uma versão inferior ao
+        # requisito consolidado do Trivy.
+        selected = result.get("recommended_version")
+        if result.get("approved") and minimum_required_version and selected:
+            if _version_key(selected) < _version_key(minimum_required_version):
+                result["approved"] = False
+                result["strategy"] = "manual-review"
+                result["justification"] = (
+                    f"IA selecionou {selected}, mas o Trivy exige pelo menos "
+                    f"{minimum_required_version} para cobrir todas as CVEs. "
+                    "Decisão rebaixada para MANUAL_REVIEW."
+                )
 
+        return result
+
+    except Exception as e:
+        print(f"    ⚠️ Erro na análise da IA: {e}")
+
+        # Fallback seguro: usa APENAS uma versão homologada que atende
+        # ao requisito consolidado do Trivy. Nunca cai para OSV isoladamente
+        # quando isso poderia resultar em uma versão vulnerável.
+        safe_ver = curated_candidate
+
+        if safe_ver:
+            return {
+                "approved": severity in ("CRITICAL", "HIGH", "MEDIUM"),
+                "recommended_version": safe_ver,
+                "risk_level": "MEDIUM" if severity == "MEDIUM" else "HIGH",
+                "strategy": (
+                    "same-major" if str(safe_ver).split(".")[0] ==
+                    str(installed_version).split(".")[0]
+                    else "newer-major"
+                ),
+                "justification": (
+                    f"Fallback seguro: {safe_ver} é versão homologada e "
+                    f"atende ao requisito consolidado do Trivy "
+                    f"({minimum_required_version})."
+                )
+            }
+
+        return {
+            "approved": False,
+            "recommended_version": None,
+            "risk_level": "HIGH",
+            "strategy": "manual-review",
+            "justification": (
+                f"Não foi possível determinar uma versão homologada que "
+                f"atenda a todas as CVEs. Requisito mínimo do Trivy: "
+                f"{minimum_required_version or 'não informado'}."
+            )
+        }
 
 def gerar_virtual_patch(package_name, cves, installed_version, ecosystem):
     """
@@ -290,53 +435,90 @@ def analisar_lote(vulnerabilidades):
     """
     Req 3: Analisa um lote agrupado por pacote.
     Req 3.5: Consolida múltiplas CVEs do mesmo pacote em uma única decisão.
-    Retorna lista de dicts com decisão por pacote.
     """
-    # Agrupa por pacote — consolida CVEs (Req 3.5)
     pacotes = {}
+
     for vuln in vulnerabilidades:
         pkg = vuln["package_name"]
+
         if pkg not in pacotes:
             pacotes[pkg] = {
                 "package_name": pkg,
                 "installed_version": vuln["installed_version"],
                 "severity": vuln["severity"],
                 "cves": [],
-                "fixed_version": vuln.get("fixed_version", ""),
+                "fixed_versions": [],
                 "ecosystem": vuln.get("ecosystem", "PHP"),
-                "recommended_version": vuln.get("recommended_version"),
+                "recommended_versions": [],
                 "ids": []
             }
-        pacotes[pkg]["cves"].append(vuln["cve_id"])
-        pacotes[pkg]["ids"].append(vuln["id"])
 
-        # Mantém severidade mais alta
+        info = pacotes[pkg]
+
+        info["cves"].append(vuln["cve_id"])
+        info["ids"].append(vuln["id"])
+
+        # IMPORTANTÍSSIMO:
+        # Não guarda somente o FixedVersion da primeira CVE.
+        # Todas as correções precisam ser consolidadas.
+        info["fixed_versions"].extend(
+            _normalize_versions(vuln.get("fixed_version"))
+        )
+
+        if vuln.get("recommended_version"):
+            info["recommended_versions"].append(
+                vuln["recommended_version"]
+            )
+
         sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-        if sev_order.get(vuln["severity"], 9) < sev_order.get(pacotes[pkg]["severity"], 9):
-            pacotes[pkg]["severity"] = vuln["severity"]
+        if sev_order.get(vuln["severity"], 9) < sev_order.get(info["severity"], 9):
+            info["severity"] = vuln["severity"]
 
     resultados = []
+
     for pkg, info in pacotes.items():
-        print(f"  🧠 IA analisando {pkg} {info['installed_version']} "
-              f"(severity: {info['severity']}, CVEs: {len(info['cves'])})...")
+        fixed_versions = list(dict.fromkeys(info["fixed_versions"]))
+        recommended_version = (
+            info["recommended_versions"][0]
+            if info["recommended_versions"]
+            else None
+        )
+
+        print(
+            f"  🧠 IA analisando {pkg} {info['installed_version']} "
+            f"(severity: {info['severity']}, CVEs: {len(info['cves'])})..."
+        )
+        print(
+            f"      Trivy FixedVersions consolidadas: "
+            f"{', '.join(fixed_versions) if fixed_versions else 'nenhuma'}"
+        )
 
         decisao = analisar_pacote(
             package_name=pkg,
             installed_version=info["installed_version"],
             severity=info["severity"],
             cves=info["cves"],
-            fixed_versions=info["fixed_version"],
+            fixed_versions=fixed_versions,
             ecosystem=info["ecosystem"],
-            recommended_version=info["recommended_version"]
+            recommended_version=recommended_version
         )
 
-        status = "✅ APPROVED" if decisao["approved"] else "⏸️  MANUAL_REVIEW"
-        print(f"    → {status}: {decisao['justification'][:100]}")
+        status = (
+            "✅ APPROVED"
+            if decisao.get("approved")
+            else "⏸️  MANUAL_REVIEW"
+        )
+
+        print(
+            f"    → {status}: "
+            f"{decisao.get('recommended_version')} — "
+            f"{decisao.get('justification', '')[:120]}"
+        )
 
         resultados.append({
             "package_name": pkg,
             "ids": info["ids"],
-            "decision": "APPROVED" if decisao["approved"] else "MANUAL_REVIEW",
+            "decision": "APPROVED" if decisao.get("approved") else "MANUAL_REVIEW",
             "recommended_version": decisao.get("recommended_version"),
             "justification": decisao.get("justification", ""),
             "strategy": decisao.get("strategy", ""),
@@ -344,3 +526,4 @@ def analisar_lote(vulnerabilidades):
         })
 
     return resultados
+
