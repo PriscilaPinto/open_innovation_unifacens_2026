@@ -19,6 +19,7 @@ import json
 import time
 import subprocess
 import shutil
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -252,6 +253,178 @@ def stage1_load_and_persist(conn, report_path="reports/report.json"):
 # Req 3: análise orientada por IA
 # AGORA: Agrupa vulnerabilidades por ecossistema também
 # ============================================================
+
+
+def _version_key(version):
+    """Compara versões de dependências sem depender de pacote externo."""
+    nums = re.findall(r"\d+", str(version or ""))
+    return tuple(int(n) for n in nums) if nums else (0,)
+
+
+def _normalize_versions(value):
+    """Normaliza FixedVersion do Trivy para uma lista de versões."""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+
+    result = []
+    for item in values:
+        if not item:
+            continue
+        parts = re.split(r"\s*,\s*|\s*;\s*", str(item))
+        result.extend(p.strip() for p in parts if p.strip())
+    return list(dict.fromkeys(result))
+
+
+def _candidate_fixes_all_cves(candidate, vulnerabilities):
+    """Garante que a versão candidata atende a FixedVersion de TODAS as CVEs."""
+    if not candidate or not vulnerabilities:
+        return False
+
+    by_cve = {}
+    for vuln in vulnerabilities:
+        by_cve.setdefault(vuln["cve_id"], _normalize_versions(vuln.get("fixed_version")))
+
+    for fixed_versions in by_cve.values():
+        if not fixed_versions:
+            return False
+        if not any(_version_key(candidate) >= _version_key(fixed) for fixed in fixed_versions):
+            return False
+    return True
+
+
+def _get_curated_versions(conn, package_name, ecosystem):
+    """Retorna todas as versões homologadas para o pacote/ecossistema."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT safe_version, approved_by, notes, approved_at
+        FROM homologated_versions
+        WHERE package_name=%s AND ecosystem=%s
+        ORDER BY approved_at DESC
+    """, (package_name, ecosystem))
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {
+            "version": row[0],
+            "approved_by": row[1],
+            "notes": row[2],
+            "approved_at": str(row[3]) if row[3] else None,
+        }
+        for row in rows
+    ]
+
+
+def _select_curated_safe_version(conn, package_name, ecosystem, vulnerabilities):
+    """Escolhe a menor versão homologada que corrige todas as CVEs.
+
+    Same-major é preferência de compatibilidade. Se não houver uma versão
+    homologada segura no mesmo major, procura a menor homologada segura em
+    major superior.
+    """
+    versions = _get_curated_versions(conn, package_name, ecosystem)
+    if not versions:
+        return None
+
+    installed = vulnerabilities[0].get("installed_version")
+    installed_major = str(installed or "").lstrip("v").split(".")[0]
+
+    candidates = [
+        v["version"] for v in versions
+        if _candidate_fixes_all_cves(v["version"], vulnerabilities)
+    ]
+
+    same_major = [
+        v for v in candidates
+        if str(v).lstrip("v").split(".")[0] == installed_major
+    ]
+
+    pool = same_major or candidates
+    return min(pool, key=_version_key) if pool else None
+
+
+def _validate_ai_decision(conn, decision, vulnerabilities, ecosystem):
+    """Valida a decisão da IA antes de permitir que ela chegue ao Stage 3.
+
+    A IA continua sendo a tomadora de decisão, mas o framework mantém um
+    guardrail determinístico: uma versão aprovada não pode ser vulnerável
+    segundo as evidências do próprio Trivy nem deixar de ser homologada.
+    """
+    if decision.get("decision") != "APPROVED":
+        return decision
+
+    pkg = decision["package_name"]
+    candidate = decision.get("recommended_version")
+
+    if not candidate:
+        decision["decision"] = "MANUAL_REVIEW"
+        decision["justification"] = (
+            decision.get("justification", "")
+            + " Guardrail: IA aprovou sem informar versão recomendada."
+        ).strip()
+        return decision
+
+    if not _candidate_fixes_all_cves(candidate, vulnerabilities):
+        decision["decision"] = "MANUAL_REVIEW"
+        decision["justification"] = (
+            decision.get("justification", "")
+            + f" Guardrail: {candidate} não atende todas as FixedVersion do Trivy."
+        ).strip()
+        return decision
+
+    curated = _get_curated_versions(conn, pkg, ecosystem)
+    curated_versions = {v["version"] for v in curated}
+    if candidate not in curated_versions:
+        decision["decision"] = "MANUAL_REVIEW"
+        decision["justification"] = (
+            decision.get("justification", "")
+            + f" Guardrail: {candidate} não está homologada no banco curado."
+        ).strip()
+        return decision
+
+    return decision
+
+
+def _fallback_decision_by_curated(conn, vulns, ecosystem):
+    """Fallback determinístico e seguro quando a IA não está disponível."""
+    decisions = []
+    by_pkg = {}
+    for vuln in vulns:
+        by_pkg.setdefault(vuln["package_name"], []).append(vuln)
+
+    severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
+    for pkg, items in by_pkg.items():
+        highest = min(
+            (v.get("severity", "UNKNOWN") for v in items),
+            key=lambda s: severity_rank.get(s, 9),
+            default="UNKNOWN",
+        )
+        candidate = _select_curated_safe_version(conn, pkg, ecosystem, items)
+
+        if candidate and highest in ("CRITICAL", "HIGH", "MEDIUM"):
+            decision = "APPROVED"
+            justification = (
+                f"Fallback seguro: {candidate} está homologada no banco curado "
+                "e atende às FixedVersion de todas as CVEs do pacote."
+            )
+        elif highest == "LOW":
+            decision = "IGNORE"
+            justification = "Fallback: vulnerabilidade LOW sem remediação automática."
+        else:
+            decision = "MANUAL_REVIEW"
+            justification = (
+                "Fallback seguro: nenhuma versão homologada demonstrou corrigir "
+                "todas as CVEs do pacote."
+            )
+
+        decisions.append((pkg, decision, candidate, justification))
+
+    return decisions
+
 def stage2_ai_decide(conn):
     log("=" * 60)
     log("STAGE 2 — Agente de IA: Análise e Decisão de Remediação (Multi-Linguagem)")
@@ -307,16 +480,20 @@ def stage2_ai_decide(conn):
             try:
                 decisoes = analisar_lote(vulns)
                 for d in decisoes:
-                    pkg      = d["package_name"]
+                    pkg = d["package_name"]
+                    package_vulns = [v for v in vulns if v["package_name"] == pkg]
+                    d = _validate_ai_decision(conn, d, package_vulns, ecosystem)
                     decision = d["decision"]
-                    rec_ver  = d.get("recommended_version")
-                    justif   = d.get("justification", "")
+                    rec_ver = d.get("recommended_version")
+                    justif = d.get("justification", "")
 
-                    if decision == "APPROVED":   approved += 1
-                    elif decision == "IGNORE":   ignored  += 1
-                    else:                        manual   += 1
+                    if decision == "APPROVED":
+                        approved += 1
+                    elif decision == "IGNORE":
+                        ignored += 1
+                    else:
+                        manual += 1
 
-                    # Atualiza todos os registros do pacote com a decisão da IA
                     cur.execute("""
                         UPDATE vulnerability_records
                         SET decision_status=%s, ai_justification=%s,
@@ -331,68 +508,48 @@ def stage2_ai_decide(conn):
                 conn.commit()
                 log(f"  ✅ {ecosystem}: Approved={approved} | Manual={manual} | Ignored={ignored}")
             except Exception as e:
-                log(f"  Agente de IA falhou: {e}. Usando fallback.", "WARN")
+                log(f"  Agente de IA falhou: {e}. Usando fallback seguro baseado no banco homologado.", "WARN")
                 conn.rollback()
-                
-                # Fallback por severidade para este ecossistema
-                log(f"  Usando regras de severidade como fallback para {ecosystem}...")
-                seen = set()
-                for vuln in vulns:
-                    pkg = vuln["package_name"]
-                    if pkg in seen:
-                        continue
-                    seen.add(pkg)
-                    sev = vuln["severity"]
-                    rec = vuln["recommended_version"]
 
-                    # HIGH/CRITICAL sempre aprova (composer update faz o resto)
-                    if sev in ("CRITICAL", "HIGH"):
-                        dec = "APPROVED";      approved += 1
-                    elif sev == "LOW":
-                        dec = "IGNORE";        ignored  += 1
+                for pkg, dec, rec, justif in _fallback_decision_by_curated(conn, vulns, ecosystem):
+                    if dec == "APPROVED":
+                        approved += 1
+                    elif dec == "IGNORE":
+                        ignored += 1
                     else:
-                        dec = "MANUAL_REVIEW"; manual   += 1
-
+                        manual += 1
                     cur.execute("""
                         UPDATE vulnerability_records
                         SET decision_status=%s,
-                            ai_justification='Fallback: regra de severidade (IA indisponível)',
+                            recommended_version=COALESCE(%s, recommended_version),
+                            ai_justification=%s,
                             updated_at=NOW()
-                        WHERE package_name=%s AND ecosystem=%s 
-                          AND remediation_status='OPEN' AND decision_status='PENDING'
-                    """, (dec, pkg, ecosystem))
-                
+                        WHERE package_name=%s AND ecosystem=%s
+                          AND remediation_status='OPEN'
+                          AND decision_status='PENDING'
+                    """, (dec, rec, justif, pkg, ecosystem))
+                    log(f"    {pkg}: {dec} → {rec or 'N/A'}")
                 conn.commit()
         else:
-            # Sem IA — apenas severidade
-            log(f"  Sem agente de IA — usando regras de severidade para {ecosystem}...")
-            seen = set()
-            for vuln in vulns:
-                pkg = vuln["package_name"]
-                if pkg in seen:
-                    continue
-                seen.add(pkg)
-                sev = vuln["severity"]
-                rec = vuln["recommended_version"]
-
-                # HIGH/CRITICAL sempre aprova (composer update faz o resto)
-                if sev in ("CRITICAL", "HIGH"):
-                    dec = "APPROVED";      approved += 1
-                elif sev == "LOW":
-                    dec = "IGNORE";        ignored  += 1
+            log(f"  Sem agente de IA — usando fallback seguro baseado no banco homologado...", "WARN")
+            for pkg, dec, rec, justif in _fallback_decision_by_curated(conn, vulns, ecosystem):
+                if dec == "APPROVED":
+                    approved += 1
+                elif dec == "IGNORE":
+                    ignored += 1
                 else:
-                    dec = "MANUAL_REVIEW"; manual   += 1
-
+                    manual += 1
                 cur.execute("""
                     UPDATE vulnerability_records
                     SET decision_status=%s,
-                        ai_justification='Fallback: regra de severidade (IA indisponível)',
+                        recommended_version=COALESCE(%s, recommended_version),
+                        ai_justification=%s,
                         updated_at=NOW()
-                    WHERE package_name=%s AND ecosystem=%s 
-                      AND remediation_status='OPEN' AND decision_status='PENDING'
-                """, (dec, pkg, ecosystem))
-                log(f"    {pkg}: {dec} (severity={sev})")
-            
+                    WHERE package_name=%s AND ecosystem=%s
+                      AND remediation_status='OPEN'
+                      AND decision_status='PENDING'
+                """, (dec, rec, justif, pkg, ecosystem))
+                log(f"    {pkg}: {dec} → {rec or 'N/A'}")
             conn.commit()
 
     cur.close()
@@ -444,12 +601,23 @@ def run_smoke_test(ecosystem):
         return result.returncode == 0
     
     elif ecosystem == "Python":
-        # Valida sintaxe Python
+        # Valida sintaxe Python sem mascarar falhas.
+        files = []
+        for root, dirs, filenames in os.walk("."):
+            dirs[:] = [d for d in dirs if d not in {".git", "venv", "env", ".venv", "__pycache__"}]
+            files.extend(os.path.join(root, f) for f in filenames if f.endswith(".py"))
+
+        if not files:
+            return True
+
         result = subprocess.run(
-            "python -m py_compile $(find . -name '*.py' -not -path './venv/*' -not -path './env/*') 2>&1 || true",
-            shell=True, capture_output=True, text=True, timeout=60
+            [sys.executable, "-m", "py_compile", *files],
+            capture_output=True, text=True, timeout=60
         )
-        return True  # Não bloqueante para Python
+        if result.returncode != 0:
+            log(f"      ❌ Smoke test Python falhou: {result.stderr[:200]}", "WARN")
+            return False
+        return True
     
     return True
 
@@ -498,11 +666,11 @@ def stage3_apply_patches(conn):
         
         # Busca vulnerabilidades APPROVED deste ecossistema
         cur.execute("""
-            SELECT DISTINCT ON (package_name)
-                id, package_name, installed_version, recommended_version, ai_justification
+            SELECT package_name, installed_version, recommended_version, ai_justification
             FROM vulnerability_records
             WHERE decision_status='APPROVED' AND remediation_status='OPEN'
               AND ecosystem=%s
+            GROUP BY package_name, installed_version, recommended_version, ai_justification
             ORDER BY package_name
         """, (ecosystem,))
         rows = cur.fetchall()
@@ -515,7 +683,22 @@ def stage3_apply_patches(conn):
         
         remediated = failed = virtual_patched = 0
         
-        for _, pkg, old_ver, new_ver, justif in rows:
+        for pkg, old_ver, new_ver, justif in rows:
+            # Segurança adicional: Stage 3 nunca instala uma versão que não
+            # esteja homologada. A decisão já foi validada no Stage 2, mas este
+            # guardrail protege contra dados inconsistentes no banco.
+            curated_versions = {v["version"] for v in _get_curated_versions(conn, pkg, ecosystem)}
+            if not new_ver or new_ver not in curated_versions:
+                log(f"      ⏸️  Versão {new_ver or 'N/A'} não está homologada — MANUAL_REVIEW", "WARN")
+                cur.execute("""
+                    UPDATE vulnerability_records
+                    SET decision_status='MANUAL_REVIEW', updated_at=NOW()
+                    WHERE package_name=%s AND ecosystem=%s
+                      AND decision_status='APPROVED' AND remediation_status='OPEN'
+                """, (pkg, ecosystem))
+                conn.commit()
+                continue
+
             # Se new_ver for None, usar "update" genérico
             if new_ver:
                 log(f"    {pkg}: {old_ver} → {new_ver}")
