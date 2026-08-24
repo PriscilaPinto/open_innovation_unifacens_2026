@@ -288,33 +288,45 @@ def _version_meets_trivy_requirement(
     fixed_versions
 ):
     """
-    Verifica se uma versão atende ao requisito de segurança
-    fornecido pelo Trivy.
+    Valida uma versão contra as alternativas de correção
+    fornecidas pelo Trivy para UMA vulnerabilidade.
 
-    Quando existem múltiplas CVEs, utiliza a maior
-    FixedVersion como requisito consolidado.
+    Atenção: FixedVersion pode conter várias alternativas
+    (por exemplo, diferentes linhas major). Portanto NÃO se
+    deve usar a maior versão da lista como requisito global.
+    Uma versão é válida quando é igual ou superior a pelo
+    menos uma das versões que corrige aquela vulnerabilidade.
     """
 
     if not candidate:
         return False
 
-    fixed_versions = _normalize_versions(
-        fixed_versions
-    )
+    fixed_versions = _normalize_versions(fixed_versions)
 
     if not fixed_versions:
         return False
 
-    required = _max_version(
-        fixed_versions
+    return any(
+        _version_key(candidate) >= _version_key(fixed)
+        for fixed in fixed_versions
     )
 
-    if not required:
+
+def _candidate_fixes_all_groups(candidate, fixed_version_groups):
+    """
+    Valida uma versão contra TODAS as vulnerabilidades do pacote.
+
+    Cada CVE possui seu próprio conjunto de FixedVersions.
+    A versão candidata precisa satisfazer pelo menos uma
+    correção válida em cada grupo/CVE.
+    """
+
+    if not candidate or not fixed_version_groups:
         return False
 
-    return (
-        _version_key(candidate)
-        >= _version_key(required)
+    return all(
+        _version_meets_trivy_requirement(candidate, group)
+        for group in fixed_version_groups
     )
 
 
@@ -325,7 +337,8 @@ def _version_meets_trivy_requirement(
 def _select_curated_version(
     curated_versions,
     fixed_versions,
-    installed_version
+    installed_version,
+    fixed_version_groups=None
 ):
     """
     Seleciona uma versão homologada que atende
@@ -344,17 +357,30 @@ def _select_curated_version(
     Não é uma restrição de segurança.
     """
 
-    candidates = [
-        item["version"]
-        for item in curated_versions
-        if (
-            item.get("version")
-            and _version_meets_trivy_requirement(
-                item["version"],
-                fixed_versions
+    if fixed_version_groups:
+        candidates = [
+            item["version"]
+            for item in curated_versions
+            if (
+                item.get("version")
+                and _candidate_fixes_all_groups(
+                    item["version"],
+                    fixed_version_groups
+                )
             )
-        )
-    ]
+        ]
+    else:
+        candidates = [
+            item["version"]
+            for item in curated_versions
+            if (
+                item.get("version")
+                and _version_meets_trivy_requirement(
+                    item["version"],
+                    fixed_versions
+                )
+            )
+        ]
 
     if not candidates:
         return None
@@ -400,7 +426,8 @@ def analisar_pacote(
     cves,
     fixed_versions,
     ecosystem,
-    recommended_versions=None
+    recommended_versions=None,
+    fixed_version_groups=None
 ):
     """
     A IA analisa todas as evidências e toma a decisão.
@@ -431,14 +458,20 @@ def analisar_pacote(
         recommended_versions
     )
 
-    minimum_required_version = _max_version(
-        fixed_versions
-    )
+    if fixed_version_groups:
+        safe_groups = [
+            _normalize_versions(group)
+            for group in fixed_version_groups
+            if _normalize_versions(group)
+        ]
+    else:
+        safe_groups = [fixed_versions] if fixed_versions else []
 
     curated_candidate = _select_curated_version(
         curated_versions,
         fixed_versions,
-        installed_version
+        installed_version,
+        safe_groups
     )
 
     # ========================================================
@@ -462,8 +495,8 @@ def analisar_pacote(
 
         "trivy_fixed_versions": fixed_versions,
 
-        "trivy_minimum_required_version":
-            minimum_required_version,
+        "trivy_fixed_version_groups":
+            safe_groups,
 
         # ----------------------------------------------------
         # Evidências do OSV armazenadas no banco
@@ -670,9 +703,9 @@ Return ONLY valid JSON:
             # IA escolheu versão abaixo do Trivy
             # ------------------------------------------------
 
-            elif not _version_meets_trivy_requirement(
+            elif not _candidate_fixes_all_groups(
                 selected,
-                fixed_versions
+                safe_groups
             ):
 
                 result["approved"] = False
@@ -683,8 +716,8 @@ Return ONLY valid JSON:
 
                 result["justification"] = (
                     f"A versão {selected} não atende "
-                    f"ao requisito mínimo do Trivy "
-                    f"({minimum_required_version})."
+                    "a pelo menos uma correção exigida "
+                    "por cada CVE segundo as FixedVersions do Trivy."
                 )
 
         return result
@@ -727,9 +760,9 @@ Return ONLY valid JSON:
 
         for candidate in recommended_versions:
 
-            if _version_meets_trivy_requirement(
+            if _candidate_fixes_all_groups(
                 candidate,
-                fixed_versions
+                safe_groups
             ):
 
                 database_candidate = candidate
@@ -796,7 +829,7 @@ Return ONLY valid JSON:
                         f"Utilizada a versão {database_candidate} "
                         "encontrada nas evidências persistidas "
                         "no banco e validada contra o requisito "
-                        f"do Trivy ({minimum_required_version})."
+                        "do Trivy para todas as CVEs afetadas."
                     )
             }
 
@@ -817,8 +850,7 @@ Return ONLY valid JSON:
                 (
                     "IA indisponível e o banco não possui "
                     "uma versão segura capaz de atender "
-                    "ao requisito do Trivy "
-                    f"({minimum_required_version or 'não informado'})."
+                    "aos requisitos do Trivy para todas as CVEs afetadas."
                 )
         }
 
@@ -872,6 +904,9 @@ def analisar_lote(vulnerabilidades):
                 "fixed_versions":
                     [],
 
+                "fixed_version_groups":
+                    [],
+
                 "ecosystem":
                     vuln.get(
                         "ecosystem",
@@ -907,11 +942,14 @@ def analisar_lote(vulnerabilidades):
         # FixedVersion do Trivy
         # ----------------------------------------------------
 
-        info["fixed_versions"].extend(
-            _normalize_versions(
-                vuln.get("fixed_version")
-            )
+        fixed_group = _normalize_versions(
+            vuln.get("fixed_version")
         )
+
+        info["fixed_versions"].extend(fixed_group)
+
+        if fixed_group:
+            info["fixed_version_groups"].append(fixed_group)
 
         # ----------------------------------------------------
         # Recomendação OSV
@@ -963,6 +1001,10 @@ def analisar_lote(vulnerabilidades):
             dict.fromkeys(
                 info["fixed_versions"]
             )
+        )
+
+        fixed_version_groups = info.get(
+            "fixed_version_groups", []
         )
 
         recommended_versions = list(
@@ -1021,7 +1063,10 @@ def analisar_lote(vulnerabilidades):
                 info["ecosystem"],
 
             recommended_versions=
-                recommended_versions
+                recommended_versions,
+
+            fixed_version_groups=
+                fixed_version_groups
         )
 
         # ----------------------------------------------------
