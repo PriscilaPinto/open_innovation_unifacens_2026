@@ -1724,16 +1724,67 @@ def stage4_validate_via_report(
     )
     log("=" * 60)
 
-    if not os.path.exists(
-        post_report_path
-    ):
+    # Se a Pipeline 1 ainda não gerou o relatório pós-patch,
+    # o próprio framework executa a validação final com Trivy.
+    # Isso evita declarar SUCCESS apenas porque o arquivo não existe.
+    if not os.path.exists(post_report_path):
 
-        log(
-            "Relatório pós-patch não encontrado.",
-            "WARN"
+        trivy = shutil.which("trivy")
+
+        if not trivy:
+            log(
+                "Trivy não encontrado para validação pós-patch.",
+                "ERROR"
+            )
+            return False
+
+        os.makedirs(
+            os.path.dirname(post_report_path) or ".",
+            exist_ok=True
         )
 
-        return True
+        log(
+            "🔍 Executando re-scan Trivy pós-patch..."
+        )
+
+        result = subprocess.run(
+            [
+                trivy,
+                "fs",
+                ".",
+                "--scanners",
+                "vuln",
+                "--format",
+                "json",
+                "--output",
+                post_report_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+
+        # Trivy pode retornar exit code 1 quando encontra vulnerabilidades.
+        # O JSON é a fonte da verdade; portanto o código de saída não é
+        # considerado erro fatal se o relatório foi produzido.
+        if result.returncode not in (0, 1):
+            log(
+                "Falha na execução do Trivy pós-patch: "
+                f"{result.stderr[:500]}",
+                "ERROR"
+            )
+            return False
+
+        if not os.path.exists(post_report_path):
+            log(
+                "Trivy não produziu o relatório pós-patch.",
+                "ERROR"
+            )
+            return False
+
+        log(
+            f"✅ Relatório pós-patch gerado: {post_report_path}"
+        )
 
     try:
 
