@@ -22,7 +22,8 @@ import re
 import json
 import time
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -40,7 +41,7 @@ MAX_RETRIES = 5
 
 def get_client():
     """
-    Cria o cliente Gemini.
+    Cria o cliente Gemini usando o novo SDK google-genai.
 
     Se GEMINI_API_KEY não estiver disponível, lança exceção.
     O framework.py poderá utilizar o fallback do banco.
@@ -53,17 +54,9 @@ def get_client():
             "GEMINI_API_KEY não configurada."
         )
 
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
-    model = genai.GenerativeModel(
-        MODEL,
-        generation_config=genai.GenerationConfig(
-            max_output_tokens=MAX_TOKENS,
-            temperature=TEMPERATURE,
-        )
-    )
-
-    return model
+    return client
 
 
 # ============================================================
@@ -84,7 +77,14 @@ def _call_with_retry(model, prompt):
 
         try:
 
-            response = model.generate_content(prompt)
+            response = model.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=MAX_TOKENS,
+                    temperature=TEMPERATURE,
+                ),
+            )
 
             return response.text or ""
 
@@ -719,21 +719,38 @@ Return ONLY valid JSON:
         if result.get("approved"):
 
             # ------------------------------------------------
-            # IA aprovou sem indicar versão
+            # IA aprovou sem indicar versão:
+            # Tenta resgatar a versão do banco homologado
+            # (curated_candidate já foi calculado acima).
+            # Só vai para MANUAL_REVIEW se não houver candidato.
             # ------------------------------------------------
 
             if not selected:
 
-                result["approved"] = False
-
-                result["strategy"] = (
-                    "manual-review"
-                )
-
-                result["justification"] = (
-                    "IA aprovou a remediação, "
-                    "mas não informou uma versão."
-                )
+                if curated_candidate and _candidate_fixes_all_groups(
+                    curated_candidate, safe_groups
+                ):
+                    result["recommended_version"] = curated_candidate
+                    result["strategy"] = (
+                        "same-major"
+                        if (
+                            str(curated_candidate).lstrip("v").split(".")[0]
+                            == str(installed_version or "").lstrip("v").split(".")[0]
+                        )
+                        else "newer-major"
+                    )
+                    result["justification"] = (
+                        "IA aprovou a remediação. "
+                        f"Versão resgatada do banco homologado: {curated_candidate}."
+                    )
+                    selected = curated_candidate
+                else:
+                    result["approved"] = False
+                    result["strategy"] = "manual-review"
+                    result["justification"] = (
+                        "IA aprovou a remediação, mas não informou uma versão "
+                        "e não há candidato homologado válido no banco."
+                    )
 
             # ------------------------------------------------
             # IA escolheu versão abaixo do Trivy
