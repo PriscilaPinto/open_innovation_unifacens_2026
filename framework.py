@@ -1290,7 +1290,15 @@ def _build_batch_command(pm, packages):
             f"{pkg}:{ver}"
             for pkg, ver in packages
         ]
-        return ["composer", "require", *args, "--no-interaction"]
+        # --with-all-dependencies: permite ao composer atualizar
+        # dependências transitivas necessárias para satisfazer os
+        # novos requisitos (ex: guzzle 7.x requer psr7 ^2.0 e
+        # promises ^2.0, que precisam ser atualizados juntos).
+        return [
+            "composer", "require", *args,
+            "--with-all-dependencies",
+            "--no-interaction"
+        ]
 
     if pm == "npm":
         args = [

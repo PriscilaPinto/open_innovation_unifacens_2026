@@ -29,7 +29,7 @@ load_dotenv()
 
 
 MODEL = os.getenv("AI_MODEL", "gemini-2.5-flash")
-MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "600"))
+MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "1024"))
 TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.1"))
 MAX_RETRIES = 5
 
@@ -648,19 +648,20 @@ Return ONLY valid JSON:
 
         # ----------------------------------------------------
         # Parse JSON
+        # Lida com respostas truncadas (MAX_TOKENS atingido):
+        # tenta extrair o JSON parcial e completar as chaves
+        # mínimas antes de falhar para o fallback.
         # ----------------------------------------------------
 
         try:
 
-            result = json.loads(
-                content
-            )
+            result = json.loads(content)
 
         except json.JSONDecodeError:
 
+            # Tenta extrair bloco JSON mesmo que truncado.
             match = re.search(
-                r'\{.*?"approved"\s*:\s*'
-                r'(true|false).*?\}',
+                r'\{.*?"approved"\s*:\s*(true|false)',
                 content,
                 re.DOTALL
             )
@@ -668,9 +669,44 @@ Return ONLY valid JSON:
             if not match:
                 raise
 
-            result = json.loads(
-                match.group(0)
+            # Tenta fechar o JSON truncado com valores padrão.
+            partial = match.group(0)
+
+            # Extrai campos já presentes no parcial.
+            approved_val = match.group(1)  # "true" ou "false"
+
+            ver_match = re.search(
+                r'"recommended_version"\s*:\s*"([^"]+)"',
+                partial
             )
+
+            strategy_match = re.search(
+                r'"strategy"\s*:\s*"([^"]+)"',
+                partial
+            )
+
+            just_match = re.search(
+                r'"justification"\s*:\s*"([^"]*)"',
+                partial
+            )
+
+            result = {
+                "approved": approved_val == "true",
+                "recommended_version": (
+                    ver_match.group(1) if ver_match else None
+                ),
+                "risk_level": "HIGH",
+                "strategy": (
+                    strategy_match.group(1)
+                    if strategy_match
+                    else "manual-review"
+                ),
+                "justification": (
+                    just_match.group(1)
+                    if just_match
+                    else "Resposta da IA truncada — campos extraídos parcialmente."
+                ),
+            }
 
         # ====================================================
         # GUARDRAIL DE SEGURANÇA
