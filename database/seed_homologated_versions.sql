@@ -6,7 +6,7 @@ VALUES
         'PHP',
         '7.15.2',
         'Security Team',
-        'Versão corrigida identificada pelo Trivy e homologada com base nas evidências do OSV.'
+        'Versão corrigida identificada pelo Trivy e homologada com base nas evidências do OSV. CVEs 7.12.1, 7.12.3, 7.14.2, 7.15.1 e 7.15.2 só possuem fix na major 7 — não existe correção na linha 6.x. Requer atualização conjunta com guzzlehttp/psr7:2.12.3.'
     ),
 
     (

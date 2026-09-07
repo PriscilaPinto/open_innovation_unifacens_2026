@@ -525,23 +525,37 @@ def _candidate_fixes_all_cves(
     candidate,
     vulnerabilities
 ):
+    """
+    Verifica se um candidato cobre TODAS as CVEs do pacote.
+
+    Cada CVE é tratada como um grupo independente de alternativas.
+    FixedVersion do Trivy pode conter múltiplas alternativas separadas
+    por vírgula (ex: "7.4.3, 6.5.6"), onde qualquer uma é suficiente
+    para cobrir aquela CVE. O candidato precisa satisfazer pelo menos
+    uma alternativa em CADA CVE — idêntico ao comportamento de
+    _candidate_fixes_all_groups no ai_agent.py.
+    """
 
     if not candidate or not vulnerabilities:
         return False
 
     for vuln in vulnerabilities:
 
-        fixed_versions = _normalize_versions(
+        # Cada vuln tem seu próprio grupo de FixedVersions (alternativas).
+        fixed_group = _normalize_versions(
             vuln.get("fixed_version")
         )
 
-        if not fixed_versions:
+        # CVE sem FixedVersion conhecida: não podemos confirmar cobertura.
+        if not fixed_group:
             return False
 
+        # O candidato cobre esta CVE se for >= a pelo menos
+        # uma das versões alternativas do grupo.
         if not any(
             _version_key(candidate)
             >= _version_key(fixed)
-            for fixed in fixed_versions
+            for fixed in fixed_group
         ):
             return False
 
@@ -603,6 +617,25 @@ def _select_curated_safe_version(
     ecosystem,
     vulnerabilities
 ):
+    """
+    Seleciona a versão homologada mais adequada para corrigir
+    todas as CVEs do pacote.
+
+    Estratégia (alinhada ao NIST SP 800-40 e ao ai_agent.py):
+
+      1. Filtra as versões do banco que cobrem TODAS as CVEs
+         (cada CVE precisa ser coberta por pelo menos uma das
+         alternativas do seu FixedVersion).
+
+      2. Entre os candidatos válidos, prefere o menor same-major
+         (menor impacto de compatibilidade em aplicações legadas).
+
+      3. Se não existir candidato same-major, usa o menor candidato
+         cross-major disponível (não inventa versão, não usa
+         versão abaixo do requisito do Trivy).
+
+      4. Retorna None se nenhuma versão homologada for segura.
+    """
 
     versions = _get_curated_versions(
         conn,
@@ -615,7 +648,7 @@ def _select_curated_safe_version(
 
     installed = vulnerabilities[0].get(
         "installed_version"
-    )
+    ) if vulnerabilities else None
 
     installed_major = (
         str(installed or "")
@@ -623,10 +656,12 @@ def _select_curated_safe_version(
         .split(".")[0]
     )
 
+    # Filtra somente versões que cobrem TODAS as CVEs.
     candidates = [
         v["version"]
         for v in versions
-        if _candidate_fixes_all_cves(
+        if v.get("version")
+        and _candidate_fixes_all_cves(
             v["version"],
             vulnerabilities
         )
@@ -635,21 +670,21 @@ def _select_curated_safe_version(
     if not candidates:
         return None
 
-    same_major = [
-        v
-        for v in candidates
-        if (
-            str(v).lstrip("v").split(".")[0]
-            == installed_major
-        )
-    ]
+    # Separa candidatos same-major (preferência de compatibilidade).
+    # Ignora same-major quando installed_major é vazio/indefinido.
+    same_major = []
 
-    pool = same_major or candidates
+    if installed_major:
+        same_major = [
+            v for v in candidates
+            if str(v).lstrip("v").split(".")[0] == installed_major
+        ]
 
-    return min(
-        pool,
-        key=_version_key
-    )
+    # Usa same-major se existir, senão usa o pool completo.
+    pool = same_major if same_major else candidates
+
+    # Retorna a menor versão do pool (menor impacto).
+    return min(pool, key=_version_key)
 
 
 # ============================================================
@@ -1200,6 +1235,12 @@ def stage2_ai_decide(conn):
 # APLICAÇÃO DO PATCH
 #
 # SEM VIRTUAL PATCH
+#
+# Para ecossistemas que resolvem dependências transitivas
+# (composer, npm), todos os pacotes aprovados do mesmo
+# ecossistema são instalados num único comando, permitindo
+# que o gerenciador de pacotes resolva conflitos internos
+# (ex: guzzle 7.x requer psr7 ^2.0).
 # ============================================================
 
 COMMANDS = {
@@ -1229,6 +1270,43 @@ COMMANDS = {
             f"{pkg}=={ver}"
         ],
 }
+
+
+def _build_batch_command(pm, packages):
+    """
+    Constrói um único comando de instalação para múltiplos pacotes.
+
+    Para composer e npm, que resolvem dependências transitivas,
+    instalar todos os pacotes num único comando é obrigatório —
+    evita falhas de conflito quando um pacote atualizado requer
+    uma versão diferente de outro pacote do mesmo conjunto
+    (ex: guzzle 7.x requer psr7 ^2.0).
+
+    packages: lista de (pkg_name, new_version)
+    """
+
+    if pm == "composer":
+        args = [
+            f"{pkg}:{ver}"
+            for pkg, ver in packages
+        ]
+        return ["composer", "require", *args, "--no-interaction"]
+
+    if pm == "npm":
+        args = [
+            f"{pkg}@{ver}"
+            for pkg, ver in packages
+        ]
+        return ["npm", "install", *args]
+
+    if pm == "pip":
+        args = [
+            f"{pkg}=={ver}"
+            for pkg, ver in packages
+        ]
+        return ["pip", "install", *args]
+
+    return None
 
 
 def run_smoke_test(ecosystem):
@@ -1447,18 +1525,18 @@ def stage3_apply_patches(conn):
 
         rows = cur.fetchall()
 
+        # =================================================
+        # VALIDAÇÃO: somente versões homologadas
+        # =================================================
+
+        valid_rows = []
+
         for (
             pkg,
             old_ver,
             new_ver,
             justification
         ) in rows:
-
-            # =================================================
-            # REGRA FUNDAMENTAL
-            #
-            # Nenhuma versão fora do banco pode ser instalada.
-            # =================================================
 
             curated_versions = {
                 v["version"]
@@ -1488,10 +1566,7 @@ def stage3_apply_patches(conn):
                       AND decision_status='APPROVED'
                       AND remediation_status='OPEN'
                     """,
-                    (
-                        pkg,
-                        ecosystem
-                    )
+                    (pkg, ecosystem)
                 )
 
                 continue
@@ -1515,49 +1590,72 @@ def stage3_apply_patches(conn):
                       AND decision_status='APPROVED'
                       AND remediation_status='OPEN'
                     """,
-                    (
-                        pkg,
-                        ecosystem
-                    )
+                    (pkg, ecosystem)
                 )
 
                 continue
 
-            log(
-                f"  🔧 {pkg}: "
-                f"{old_ver} → {new_ver}"
+            valid_rows.append(
+                (pkg, old_ver, new_ver, justification)
             )
 
+        conn.commit()
+
+        if not valid_rows:
+            log("  Nenhum pacote válido para atualizar.")
+            continue
+
+        # =================================================
+        # INSTALAÇÃO EM LOTE
+        #
+        # Todos os pacotes aprovados do ecossistema são
+        # instalados num único comando para que o gerenciador
+        # de pacotes resolva as dependências transitivas
+        # de forma coerente (ex: guzzle 7.x + psr7 2.x).
+        # =================================================
+
+        packages = [
+            (pkg, new_ver)
+            for pkg, old_ver, new_ver, _ in valid_rows
+        ]
+
+        for pkg, old_ver, new_ver, justification in valid_rows:
+            log(f"  🔧 {pkg}: {old_ver} → {new_ver}")
             if justification:
+                log(f"     {justification[:150]}")
 
-                log(
-                    f"     {justification[:150]}"
-                )
+        cmd = _build_batch_command(pm, packages)
 
-            cmd = COMMANDS[pm](
-                pkg,
-                new_ver
+        if not cmd:
+            log(
+                f"  ❌ Gerenciador {pm} sem suporte "
+                f"a instalação em lote.",
+                "WARN"
+            )
+            continue
+
+        log(
+            f"  ▶ Executando: {' '.join(cmd)}"
+        )
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+
+            log(
+                f"  ❌ Falha na instalação em lote "
+                f"({ecosystem}): "
+                f"{result.stderr[:400]}",
+                "WARN"
             )
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True
-            )
-
-            if result.returncode != 0:
-
-                log(
-                    f"  ❌ Falha ao instalar "
-                    f"{pkg}: "
-                    f"{result.stderr[:250]}",
-                    "WARN"
-                )
-
-                # IMPORTANTE:
-                # NÃO chama gerar_virtual_patch.
-                # NÃO tenta criar patch alternativo.
-                # NÃO inventa outra versão.
+            # Marca todos os pacotes do lote como FAILED.
+            # NÃO gera Virtual Patch, NÃO inventa versão alternativa.
+            for pkg, old_ver, new_ver, _ in valid_rows:
 
                 cur.execute(
                     """
@@ -1571,39 +1669,29 @@ def stage3_apply_patches(conn):
                       AND decision_status='APPROVED'
                       AND remediation_status='OPEN'
                     """,
-                    (
-                        pkg,
-                        ecosystem
-                    )
+                    (pkg, ecosystem)
                 )
 
                 total_failed += 1
 
-                conn.commit()
+            conn.commit()
+            continue
 
-                continue
+        log("  ✅ Instalação em lote concluída.")
 
-            log(
-                "  ✅ Update aplicado."
-            )
+        # =================================================
+        # SMOKE TEST (uma vez por ecossistema)
+        # =================================================
 
-            # =================================================
-            # SMOKE TEST
-            # =================================================
+        log("  🔍 Executando smoke test...")
 
-            log(
-                "  🔍 Executando smoke test..."
-            )
+        smoke_ok = run_smoke_test(ecosystem)
 
-            smoke_ok = run_smoke_test(
-                ecosystem
-            )
+        if smoke_ok:
 
-            if smoke_ok:
+            log("  ✅ Smoke test passou.")
 
-                log(
-                    "  ✅ Smoke test passou."
-                )
+            for pkg, old_ver, new_ver, _ in valid_rows:
 
                 cur.execute(
                     """
@@ -1617,62 +1705,52 @@ def stage3_apply_patches(conn):
                       AND decision_status='APPROVED'
                       AND remediation_status='OPEN'
                     """,
-                    (
-                        pkg,
-                        ecosystem
-                    )
+                    (pkg, ecosystem)
                 )
 
                 total_remediated += 1
 
-            else:
+        else:
 
-                # =================================================
-                # SEM VIRTUAL PATCH
-                # =================================================
+            # =================================================
+            # SEM VIRTUAL PATCH — reverte e marca FAILED
+            # =================================================
 
-                log(
-                    "  ❌ Smoke test falhou após "
-                    "a atualização.",
-                    "WARN"
-                )
+            log(
+                "  ❌ Smoke test falhou após "
+                "a atualização.",
+                "WARN"
+            )
 
-                log(
-                    "  ⛔ Virtual Patch não será "
-                    "executado. Requer validação "
-                    "antes de ser utilizado.",
-                    "WARN"
-                )
+            log(
+                "  ⛔ Virtual Patch não será "
+                "executado. Requer validação "
+                "antes de ser utilizado.",
+                "WARN"
+            )
 
-                # Reverte somente os arquivos de dependência
-                # existentes no projeto.
-
-                dependency_files = [
-                    file
-                    for file in [
-                        "composer.json",
-                        "composer.lock",
-                        "package.json",
-                        "package-lock.json",
-                        "requirements.txt",
-                        "pyproject.toml",
-                        "poetry.lock"
-                    ]
-                    if os.path.exists(file)
+            dependency_files = [
+                f
+                for f in [
+                    "composer.json",
+                    "composer.lock",
+                    "package.json",
+                    "package-lock.json",
+                    "requirements.txt",
+                    "pyproject.toml",
+                    "poetry.lock",
                 ]
+                if os.path.exists(f)
+            ]
 
-                if dependency_files:
+            if dependency_files:
+                subprocess.run(
+                    ["git", "checkout", "--", *dependency_files],
+                    capture_output=True,
+                    text=True
+                )
 
-                    subprocess.run(
-                        [
-                            "git",
-                            "checkout",
-                            "--",
-                            *dependency_files
-                        ],
-                        capture_output=True,
-                        text=True
-                    )
+            for pkg, old_ver, new_ver, _ in valid_rows:
 
                 cur.execute(
                     """
@@ -1686,15 +1764,12 @@ def stage3_apply_patches(conn):
                       AND decision_status='APPROVED'
                       AND remediation_status='OPEN'
                     """,
-                    (
-                        pkg,
-                        ecosystem
-                    )
+                    (pkg, ecosystem)
                 )
 
                 total_failed += 1
 
-            conn.commit()
+        conn.commit()
 
     cur.close()
 
